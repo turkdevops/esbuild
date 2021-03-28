@@ -1,5 +1,5 @@
 {
-  "dependencies": {
-    "estraverse": "5.2.0"
-  }
+	"dependencies": {
+		"estraverse": "5.2.0"
+	}
 }
