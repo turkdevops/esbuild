@@ -59,15 +59,16 @@ console.log(exports);
 TestExportSelfAndRequireSelfCommonJS
 ---------- /out.js ----------
 // entry.js
-var require_entry = __commonJS((exports) => {
-  __markAsModule(exports);
-  __export(exports, {
-    foo: () => foo
-  });
-  var foo = 123;
-  console.log(require_entry());
+__markAsModule(exports);
+__export(exports, {
+  foo: () => foo
 });
-module.exports = require_entry();
+var foo;
+var init_entry = __esm(() => {
+  foo = 123;
+  console.log((init_entry(), exports));
+});
+init_entry();
 
 ================================================================================
 TestExportSelfAsNamespaceCommonJS
@@ -332,18 +333,19 @@ module.exports = require_entry();
 TestImportStarAndCommonJS
 ---------- /out.js ----------
 // foo.js
-var require_foo = __commonJS((exports) => {
-  __markAsModule(exports);
-  __export(exports, {
-    foo: () => foo2
-  });
-  var foo2 = 123;
+var foo_exports = {};
+__export(foo_exports, {
+  foo: () => foo
+});
+var foo;
+var init_foo = __esm(() => {
+  foo = 123;
 });
 
 // entry.js
-var ns = require_foo();
-var ns2 = require_foo();
-console.log(ns.foo, ns2.foo);
+init_foo();
+var ns2 = (init_foo(), foo_exports);
+console.log(foo, ns2.foo);
 
 ================================================================================
 TestImportStarCapture
@@ -816,7 +818,7 @@ var mod = (() => {
 TestReExportStarCommonJSNoBundle
 ---------- /out.js ----------
 __markAsModule(exports);
-__exportStar(exports, __toModule(require("foo")));
+__reExport(exports, __toModule(require("foo")));
 
 ================================================================================
 TestReExportStarES6NoBundle
@@ -828,7 +830,7 @@ TestReExportStarExternalCommonJS
 ---------- /out.js ----------
 // entry.js
 __markAsModule(exports);
-__exportStar(exports, __toModule(require("foo")));
+__reExport(exports, __toModule(require("foo")));
 
 ================================================================================
 TestReExportStarExternalES6
@@ -842,7 +844,7 @@ TestReExportStarExternalIIFE
 var mod = (() => {
   // entry.js
   var entry_exports = {};
-  __exportStar(entry_exports, __toModule(require("foo")));
+  __reExport(entry_exports, __toModule(require("foo")));
   return entry_exports;
 })();
 
@@ -851,7 +853,7 @@ TestReExportStarIIFENoBundle
 ---------- /out.js ----------
 var mod = (() => {
   var entry_exports = {};
-  __exportStar(entry_exports, __toModule(require("foo")));
+  __reExport(entry_exports, __toModule(require("foo")));
   return entry_exports;
 })();
 

@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/evanw/esbuild/internal/config"
 	"github.com/evanw/esbuild/internal/js_ast"
@@ -17,9 +16,9 @@ import (
 )
 
 type packageJSON struct {
-	source        logger.Source
-	absMainFields map[string]string
-	moduleType    config.ModuleType
+	source     logger.Source
+	mainFields map[string]string
+	moduleType config.ModuleType
 
 	// Present if the "browser" field is present. This field is intended to be
 	// used by bundlers and lets you redirect the paths of certain 3rd-party
@@ -31,7 +30,7 @@ type packageJSON struct {
 	//
 	// This field contains a mapping of absolute paths to absolute paths. Mapping
 	// to an empty path indicates that the module is disabled. As far as I can
-	// tell, the official spec is a GitHub repo hosted by a user account:
+	// tell, the official spec is an abandoned GitHub repo hosted by a user account:
 	// https://github.com/defunctzombie/package-browser-field-spec. The npm docs
 	// say almost nothing: https://docs.npmjs.com/files/package.json.
 	//
@@ -46,8 +45,7 @@ type packageJSON struct {
 	// * Given the mapping "./ext.js": "./ext-browser.js" the query "./ext.js"
 	//   should match and the query "./ext" should ALSO match.
 	//
-	browserNonPackageMap map[string]*string
-	browserPackageMap    map[string]*string
+	browserMap map[string]*string
 
 	// If this is non-nil, each entry in this map is the absolute path of a file
 	// with side effects. Any entry not in this map should be considered to have
@@ -61,20 +59,75 @@ type packageJSON struct {
 	// not.
 	sideEffectsMap     map[string]bool
 	sideEffectsRegexps []*regexp.Regexp
-	ignoreIfUnusedData *IgnoreIfUnusedData
+	sideEffectsData    *SideEffectsData
 
 	// This represents the "exports" field in this package.json file.
 	exportsMap *peMap
 }
 
-func (r *resolver) parsePackageJSON(path string) *packageJSON {
-	packageJSONPath := r.fs.Join(path, "package.json")
-	contents, err := r.caches.FSCache.ReadFile(r.fs, packageJSONPath)
+func (r resolverQuery) checkBrowserMap(pj *packageJSON, inputPath string) (remapped *string, ok bool) {
+	// Normalize the path so we can compare against it without getting confused by "./"
+	cleanPath := path.Clean(strings.ReplaceAll(inputPath, "\\", "/"))
+
+	if cleanPath == "." {
+		// No bundler supports remapping ".", so we don't either
+		return nil, false
+	}
+
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("Checking for %q in the \"browser\" map in %q",
+			inputPath, pj.source.KeyPath.Text))
+	}
+
+	// Check for equality
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("Checking for %q", cleanPath))
+	}
+	remapped, ok = pj.browserMap[cleanPath]
+
+	// If that failed, try adding implicit extensions
+	if !ok {
+		for _, ext := range r.options.ExtensionOrder {
+			extPath := cleanPath + ext
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Checking for %q", extPath))
+			}
+			remapped, ok = pj.browserMap[extPath]
+			if ok {
+				cleanPath = extPath
+				break
+			}
+		}
+	}
+
+	if r.debugLogs != nil {
+		if ok {
+			if remapped == nil {
+				r.debugLogs.addNote(fmt.Sprintf("Found %q marked as disabled", inputPath))
+			} else {
+				r.debugLogs.addNote(fmt.Sprintf("Found %q mapping to %q", cleanPath, *remapped))
+			}
+		} else {
+			r.debugLogs.addNote(fmt.Sprintf("Failed to find %q", inputPath))
+		}
+	}
+	return
+}
+
+func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
+	packageJSONPath := r.fs.Join(inputPath, "package.json")
+	contents, err, originalError := r.caches.FSCache.ReadFile(r.fs, packageJSONPath)
+	if r.debugLogs != nil && originalError != nil {
+		r.debugLogs.addNote(fmt.Sprintf("Failed to read file %q: %s", packageJSONPath, originalError.Error()))
+	}
 	if err != nil {
 		r.log.AddError(nil, logger.Loc{},
 			fmt.Sprintf("Cannot read file %q: %s",
 				r.PrettyPath(logger.Path{Text: packageJSONPath, Namespace: "file"}), err.Error()))
 		return nil
+	}
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("The file %q exists", packageJSONPath))
 	}
 
 	keyPath := logger.Path{Text: packageJSONPath, Namespace: "file"}
@@ -86,26 +139,6 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 
 	json, ok := r.caches.JSONCache.Parse(r.log, jsonSource, js_parser.JSONOptions{})
 	if !ok {
-		return nil
-	}
-
-	toAbsPath := func(pathText string, pathRange logger.Range) *string {
-		// Is it a file?
-		if absolute, ok, _ := r.loadAsFile(pathText, r.options.ExtensionOrder); ok {
-			return &absolute
-		}
-
-		// Is it a directory?
-		if mainEntries, err := r.fs.ReadDirectory(pathText); err == nil {
-			// Look for an "index" file with known extensions
-			if absolute, ok, _ := r.loadAsIndex(pathText, mainEntries); ok {
-				return &absolute
-			}
-		} else if err != syscall.ENOENT {
-			r.log.AddRangeError(&jsonSource, pathRange,
-				fmt.Sprintf("Cannot read directory %q: %s",
-					r.PrettyPath(logger.Path{Text: pathText, Namespace: "file"}), err.Error()))
-		}
 		return nil
 	}
 
@@ -136,13 +169,11 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 	}
 	for _, field := range mainFields {
 		if mainJSON, _, ok := getProperty(json, field); ok {
-			if main, ok := getString(mainJSON); ok {
-				if packageJSON.absMainFields == nil {
-					packageJSON.absMainFields = make(map[string]string)
+			if main, ok := getString(mainJSON); ok && main != "" {
+				if packageJSON.mainFields == nil {
+					packageJSON.mainFields = make(map[string]string)
 				}
-				if absPath := toAbsPath(r.fs.Join(path, main), jsonSource.RangeOfString(mainJSON.Loc)); absPath != nil {
-					packageJSON.absMainFields[field] = *absPath
-				}
+				packageJSON.mainFields[field] = main
 			}
 		}
 	}
@@ -162,39 +193,38 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 		//
 		if browser, ok := browserJSON.Data.(*js_ast.EObject); ok {
 			// The value is an object
-			browserPackageMap := make(map[string]*string)
-			browserNonPackageMap := make(map[string]*string)
+			browserMap := make(map[string]*string)
 
 			// Remap all files in the browser field
 			for _, prop := range browser.Properties {
 				if key, ok := getString(prop.Key); ok && prop.Value != nil {
-					isPackagePath := IsPackagePath(key)
-
-					// Make this an absolute path if it's not a package
-					if !isPackagePath {
-						key = r.fs.Join(path, key)
-					}
+					// Normalize the path so we can compare against it without getting
+					// confused by "./". There is no distinction between package paths and
+					// relative paths for these values because some tools (i.e. Browserify)
+					// don't make such a distinction.
+					//
+					// This leads to weird things like a mapping for "./foo" matching an
+					// import of "foo", but that's actually not a bug. Or arguably it's a
+					// bug in Browserify but we have to replicate this bug because packages
+					// do this in the wild.
+					key = path.Clean(key)
 
 					if value, ok := getString(*prop.Value); ok {
 						// If this is a string, it's a replacement package
-						if isPackagePath {
-							browserPackageMap[key] = &value
-						} else {
-							browserNonPackageMap[key] = &value
-						}
-					} else if value, ok := getBool(*prop.Value); ok && !value {
+						browserMap[key] = &value
+					} else if value, ok := getBool(*prop.Value); ok {
 						// If this is false, it means the package is disabled
-						if isPackagePath {
-							browserPackageMap[key] = nil
-						} else {
-							browserNonPackageMap[key] = nil
+						if !value {
+							browserMap[key] = nil
 						}
+					} else {
+						r.log.AddWarning(&jsonSource, prop.Value.Loc,
+							"Each \"browser\" mapping must be a string or a boolean")
 					}
 				}
 			}
 
-			packageJSON.browserPackageMap = browserPackageMap
-			packageJSON.browserNonPackageMap = browserNonPackageMap
+			packageJSON.browserMap = browserMap
 		}
 	}
 
@@ -206,7 +236,7 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 				// Make an empty map for "sideEffects: false", which indicates all
 				// files in this module can be considered to not have side effects.
 				packageJSON.sideEffectsMap = make(map[string]bool)
-				packageJSON.ignoreIfUnusedData = &IgnoreIfUnusedData{
+				packageJSON.sideEffectsData = &SideEffectsData{
 					IsSideEffectsArrayInJSON: false,
 					Source:                   &jsonSource,
 					Range:                    jsonSource.RangeOfString(sideEffectsLoc),
@@ -217,7 +247,7 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 			// The "sideEffects: []" format means all files in this module but not in
 			// the array can be considered to not have side effects.
 			packageJSON.sideEffectsMap = make(map[string]bool)
-			packageJSON.ignoreIfUnusedData = &IgnoreIfUnusedData{
+			packageJSON.sideEffectsData = &SideEffectsData{
 				IsSideEffectsArrayInJSON: true,
 				Source:                   &jsonSource,
 				Range:                    jsonSource.RangeOfString(sideEffectsLoc),
@@ -230,7 +260,7 @@ func (r *resolver) parsePackageJSON(path string) *packageJSON {
 					continue
 				}
 
-				absPattern := r.fs.Join(path, js_lexer.UTF16ToString(item.Value))
+				absPattern := r.fs.Join(inputPath, js_lexer.UTF16ToString(item.Value))
 				re, hadWildcard := globToEscapedRegexp(absPattern)
 
 				// Wildcard patterns require more expensive matching
@@ -492,13 +522,13 @@ type peDebug struct {
 	unmatchedConditions []string
 }
 
-func esmPackageExportsResolveWithPostConditions(
+func (r resolverQuery) esmPackageExportsResolveWithPostConditions(
 	packageURL string,
 	subpath string,
 	exports peEntry,
 	conditions map[string]bool,
 ) (string, peStatus, peDebug) {
-	resolved, status, debug := esmPackageExportsResolve(packageURL, subpath, exports, conditions)
+	resolved, status, debug := r.esmPackageExportsResolve(packageURL, subpath, exports, conditions)
 	if status != peStatusExact && status != peStatusInexact {
 		return resolved, status, debug
 	}
@@ -507,16 +537,34 @@ func esmPackageExportsResolveWithPostConditions(
 	// respectively), then throw an Invalid Module Specifier error.
 	resolvedPath, err := url.PathUnescape(resolved)
 	if err != nil {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("The path %q contains invalid URL escapes: %s", resolved, err.Error()))
+		}
 		return resolved, peStatusInvalidModuleSpecifier, debug
 	}
-	if strings.Contains(resolved, "%2f") || strings.Contains(resolved, "%2F") ||
-		strings.Contains(resolved, "%5c") || strings.Contains(resolved, "%5C") {
+	var found string
+	if strings.Contains(resolved, "%2f") {
+		found = "%2f"
+	} else if strings.Contains(resolved, "%2F") {
+		found = "%2F"
+	} else if strings.Contains(resolved, "%5c") {
+		found = "%5c"
+	} else if strings.Contains(resolved, "%5C") {
+		found = "%5C"
+	}
+	if found != "" {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("The path %q is not allowed to contain %q", resolved, found))
+		}
 		return resolved, peStatusInvalidModuleSpecifier, debug
 	}
 
 	// If the file at resolved is a directory, then throw an Unsupported Directory
 	// Import error.
 	if strings.HasSuffix(resolvedPath, "/") || strings.HasSuffix(resolvedPath, "\\") {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("The path %q is not allowed to end with a slash", resolved))
+		}
 		return resolved, peStatusUnsupportedDirectoryImport, debug
 	}
 
@@ -524,13 +572,16 @@ func esmPackageExportsResolveWithPostConditions(
 	return resolvedPath, status, debug
 }
 
-func esmPackageExportsResolve(
+func (r resolverQuery) esmPackageExportsResolve(
 	packageURL string,
 	subpath string,
 	exports peEntry,
 	conditions map[string]bool,
 ) (string, peStatus, peDebug) {
 	if exports.kind == peInvalid {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("Invalid package configuration")
+		}
 		return "", peStatusInvalidPackageConfiguration, peDebug{token: exports.firstToken}
 	}
 	if subpath == "." {
@@ -539,33 +590,46 @@ func esmPackageExportsResolve(
 			mainExport = exports
 		} else if exports.kind == peObject {
 			if dot, ok := exports.valueForKey("."); ok {
+				if r.debugLogs != nil {
+					r.debugLogs.addNote("Using the entry for \".\"")
+				}
 				mainExport = dot
 			}
 		}
 		if mainExport.kind != peNull {
-			resolved, status, debug := esmPackageTargetResolve(packageURL, mainExport, "", false, conditions)
+			resolved, status, debug := r.esmPackageTargetResolve(packageURL, mainExport, "", false, conditions)
 			if status != peStatusNull && status != peStatusUndefined {
 				return resolved, status, debug
 			}
 		}
 	} else if exports.kind == peObject && exports.keysStartWithDot() {
-		resolved, status, debug := esmPackageImportsExportsResolve(subpath, exports, packageURL, conditions)
+		resolved, status, debug := r.esmPackageImportsExportsResolve(subpath, exports, packageURL, conditions)
 		if status != peStatusNull && status != peStatusUndefined {
 			return resolved, status, debug
 		}
 	}
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("The path %q not exported", subpath))
+	}
 	return "", peStatusPackagePathNotExported, peDebug{token: exports.firstToken}
 }
 
-func esmPackageImportsExportsResolve(
+func (r resolverQuery) esmPackageImportsExportsResolve(
 	matchKey string,
 	matchObj peEntry,
 	packageURL string,
 	conditions map[string]bool,
 ) (string, peStatus, peDebug) {
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("Checking object path map for %q", matchKey))
+	}
+
 	if !strings.HasSuffix(matchKey, "*") {
 		if target, ok := matchObj.valueForKey(matchKey); ok {
-			return esmPackageTargetResolve(packageURL, target, "", false, conditions)
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Found exact match for %q", matchKey))
+			}
+			return r.esmPackageTargetResolve(packageURL, target, "", false, conditions)
 		}
 	}
 
@@ -576,31 +640,44 @@ func esmPackageImportsExportsResolve(
 			if substr := expansion.key[:len(expansion.key)-1]; strings.HasPrefix(matchKey, substr) && matchKey != substr {
 				target := expansion.value
 				subpath := matchKey[len(expansion.key)-1:]
-				return esmPackageTargetResolve(packageURL, target, subpath, true, conditions)
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("The key %q matched with %q left over", expansion.key, subpath))
+				}
+				return r.esmPackageTargetResolve(packageURL, target, subpath, true, conditions)
 			}
 		}
 
 		if strings.HasPrefix(matchKey, expansion.key) {
 			target := expansion.value
 			subpath := matchKey[len(expansion.key):]
-			result, status, debug := esmPackageTargetResolve(packageURL, target, subpath, false, conditions)
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The key %q matched with %q left over", expansion.key, subpath))
+			}
+			result, status, debug := r.esmPackageTargetResolve(packageURL, target, subpath, false, conditions)
 			if status == peStatusExact {
 				// Return the object { resolved, exact: false }.
 				status = peStatusInexact
 			}
 			return result, status, debug
 		}
+
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("The key %q did not match", expansion.key))
+		}
 	}
 
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("No keys matched %q", matchKey))
+	}
 	return "", peStatusNull, peDebug{token: matchObj.firstToken}
 }
 
 // If path split on "/" or "\" contains any ".", ".." or "node_modules"
 // segments after the first segment, throw an Invalid Package Target error.
-func hasInvalidSegment(path string) bool {
+func findInvalidSegment(path string) string {
 	slash := strings.IndexAny(path, "/\\")
 	if slash == -1 {
-		return false
+		return ""
 	}
 	path = path[slash+1:]
 	for path != "" {
@@ -613,13 +690,13 @@ func hasInvalidSegment(path string) bool {
 			path = ""
 		}
 		if segment == "." || segment == ".." || segment == "node_modules" {
-			return true
+			return segment
 		}
 	}
-	return false
+	return ""
 }
 
-func esmPackageTargetResolve(
+func (r resolverQuery) esmPackageTargetResolve(
 	packageURL string,
 	target peEntry,
 	subpath string,
@@ -628,19 +705,34 @@ func esmPackageTargetResolve(
 ) (string, peStatus, peDebug) {
 	switch target.kind {
 	case peString:
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("Checking path %q against target %q", subpath, target.strData))
+			r.debugLogs.increaseIndent()
+			defer r.debugLogs.decreaseIndent()
+		}
+
 		// If pattern is false, subpath has non-zero length and target
 		// does not end with "/", throw an Invalid Module Specifier error.
 		if !pattern && subpath != "" && !strings.HasSuffix(target.strData, "/") {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it doesn't end \"/\"", target.strData))
+			}
 			return target.strData, peStatusInvalidModuleSpecifier, peDebug{token: target.firstToken}
 		}
 
 		if !strings.HasPrefix(target.strData, "./") {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it doesn't start with \"./\"", target.strData))
+			}
 			return target.strData, peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
 		}
 
 		// If target split on "/" or "\" contains any ".", ".." or "node_modules"
 		// segments after the first segment, throw an Invalid Package Target error.
-		if hasInvalidSegment(target.strData) {
+		if invalidSegment := findInvalidSegment(target.strData); invalidSegment != "" {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The target %q is invalid because it contains invalid segment %q", target.strData, invalidSegment))
+			}
 			return target.strData, peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
 		}
 
@@ -649,28 +741,59 @@ func esmPackageTargetResolve(
 
 		// If subpath split on "/" or "\" contains any ".", ".." or "node_modules"
 		// segments, throw an Invalid Module Specifier error.
-		if hasInvalidSegment(subpath) {
+		if invalidSegment := findInvalidSegment(subpath); invalidSegment != "" {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The path %q is invalid because it contains invalid segment %q", subpath, invalidSegment))
+			}
 			return subpath, peStatusInvalidModuleSpecifier, peDebug{token: target.firstToken}
 		}
 
 		if pattern {
 			// Return the URL resolution of resolvedTarget with every instance of "*" replaced with subpath.
-			return strings.ReplaceAll(resolvedTarget, "*", subpath), peStatusExact, peDebug{token: target.firstToken}
+			result := strings.ReplaceAll(resolvedTarget, "*", subpath)
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Substituted %q for \"*\" in %q to get %q", subpath, "."+resolvedTarget, "."+result))
+			}
+			return result, peStatusExact, peDebug{token: target.firstToken}
 		} else {
 			// Return the URL resolution of the concatenation of subpath and resolvedTarget.
-			return path.Join(resolvedTarget, subpath), peStatusExact, peDebug{token: target.firstToken}
+			result := path.Join(resolvedTarget, subpath)
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("Joined %q to %q to get %q", subpath, "."+resolvedTarget, "."+result))
+			}
+			return result, peStatusExact, peDebug{token: target.firstToken}
 		}
 
 	case peObject:
+		if r.debugLogs != nil {
+			keys := make([]string, 0, len(conditions))
+			for key := range conditions {
+				keys = append(keys, fmt.Sprintf("%q", key))
+			}
+			sort.Strings(keys)
+			r.debugLogs.addNote(fmt.Sprintf("Checking condition map for one of [%s]", strings.Join(keys, ", ")))
+			r.debugLogs.increaseIndent()
+			defer r.debugLogs.decreaseIndent()
+		}
+
 		for _, p := range target.mapData {
 			if p.key == "default" || conditions[p.key] {
-				targetValue := p.value
-				resolved, status, debug := esmPackageTargetResolve(packageURL, targetValue, subpath, pattern, conditions)
+				if r.debugLogs != nil {
+					r.debugLogs.addNote(fmt.Sprintf("The key %q applies", p.key))
+				}
+				resolved, status, debug := r.esmPackageTargetResolve(packageURL, p.value, subpath, pattern, conditions)
 				if status.isUndefined() {
 					continue
 				}
 				return resolved, status, debug
 			}
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The key %q does not apply", p.key))
+			}
+		}
+
+		if r.debugLogs != nil {
+			r.debugLogs.addNote("No keys in the map were applicable")
 		}
 
 		// ALGORITHM DEVIATION: Provide a friendly error message if no conditions matched
@@ -689,13 +812,21 @@ func esmPackageTargetResolve(
 
 	case peArray:
 		if len(target.arrData) == 0 {
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("The path %q is set to an empty array", subpath))
+			}
 			return "", peStatusNull, peDebug{token: target.firstToken}
+		}
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("Checking for %q in an array", subpath))
+			r.debugLogs.increaseIndent()
+			defer r.debugLogs.decreaseIndent()
 		}
 		lastException := peStatusUndefined
 		lastDebug := peDebug{token: target.firstToken}
 		for _, targetValue := range target.arrData {
 			// Let resolved be the result, continuing the loop on any Invalid Package Target error.
-			resolved, status, debug := esmPackageTargetResolve(packageURL, targetValue, subpath, pattern, conditions)
+			resolved, status, debug := r.esmPackageTargetResolve(packageURL, targetValue, subpath, pattern, conditions)
 			if status == peStatusInvalidPackageTarget || status == peStatusNull {
 				lastException = status
 				lastDebug = debug
@@ -711,9 +842,15 @@ func esmPackageTargetResolve(
 		return "", lastException, lastDebug
 
 	case peNull:
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("The path %q is set to null", subpath))
+		}
 		return "", peStatusNull, peDebug{token: target.firstToken}
 	}
 
+	if r.debugLogs != nil {
+		r.debugLogs.addNote(fmt.Sprintf("Invalid package target for path %q", subpath))
+	}
 	return "", peStatusInvalidPackageTarget, peDebug{token: target.firstToken}
 }
 
@@ -746,4 +883,118 @@ func esmParsePackageName(packageSpecifier string) (packageName string, packageSu
 	packageSubpath = "." + packageSpecifier[len(packageName):]
 	ok = true
 	return
+}
+
+func (r resolverQuery) esmPackageExportsReverseResolve(
+	query string,
+	root peEntry,
+	conditions map[string]bool,
+) (bool, string, logger.Range) {
+	if root.kind == peObject && root.keysStartWithDot() {
+		if ok, subpath, token := r.esmPackageImportsExportsReverseResolve(query, root, conditions); ok {
+			return true, subpath, token
+		}
+	}
+
+	return false, "", logger.Range{}
+}
+
+func (r resolverQuery) esmPackageImportsExportsReverseResolve(
+	query string,
+	matchObj peEntry,
+	conditions map[string]bool,
+) (bool, string, logger.Range) {
+	if !strings.HasSuffix(query, "*") {
+		for _, entry := range matchObj.mapData {
+			if ok, subpath, token := r.esmPackageTargetReverseResolve(query, entry.key, entry.value, esmReverseExact, conditions); ok {
+				return true, subpath, token
+			}
+		}
+	}
+
+	for _, expansion := range matchObj.expansionKeys {
+		if strings.HasSuffix(expansion.key, "*") {
+			if ok, subpath, token := r.esmPackageTargetReverseResolve(query, expansion.key, expansion.value, esmReversePattern, conditions); ok {
+				return true, subpath, token
+			}
+		}
+
+		if ok, subpath, token := r.esmPackageTargetReverseResolve(query, expansion.key, expansion.value, esmReversePrefix, conditions); ok {
+			return true, subpath, token
+		}
+	}
+
+	return false, "", logger.Range{}
+}
+
+type esmReverseKind uint8
+
+const (
+	esmReverseExact esmReverseKind = iota
+	esmReversePattern
+	esmReversePrefix
+)
+
+func (r resolverQuery) esmPackageTargetReverseResolve(
+	query string,
+	key string,
+	target peEntry,
+	kind esmReverseKind,
+	conditions map[string]bool,
+) (bool, string, logger.Range) {
+	switch target.kind {
+	case peString:
+		switch kind {
+		case esmReverseExact:
+			if query == target.strData {
+				return true, key, target.firstToken
+			}
+
+		case esmReversePrefix:
+			if strings.HasPrefix(query, target.strData) {
+				return true, key + query[len(target.strData):], target.firstToken
+			}
+
+		case esmReversePattern:
+			star := strings.IndexByte(target.strData, '*')
+			keyWithoutTrailingStar := strings.TrimSuffix(key, "*")
+
+			// Handle the case of no "*"
+			if star == -1 {
+				if query == target.strData {
+					return true, keyWithoutTrailingStar, target.firstToken
+				}
+				break
+			}
+
+			// Only support tracing through a single "*"
+			prefix := target.strData[0:star]
+			suffix := target.strData[star+1:]
+			if !strings.ContainsRune(suffix, '*') && strings.HasPrefix(query, prefix) {
+				if afterPrefix := query[len(prefix):]; strings.HasSuffix(afterPrefix, suffix) {
+					starData := afterPrefix[:len(afterPrefix)-len(suffix)]
+					return true, keyWithoutTrailingStar + starData, target.firstToken
+				}
+			}
+			break
+		}
+
+	case peObject:
+		for _, p := range target.mapData {
+			if p.key == "default" || conditions[p.key] {
+				if ok, subpath, token := r.esmPackageTargetReverseResolve(query, key, p.value, kind, conditions); ok {
+					return true, subpath, token
+				}
+			}
+		}
+
+	case peArray:
+		for _, targetValue := range target.arrData {
+			if ok, subpath, token := r.esmPackageTargetReverseResolve(query, key, targetValue, kind, conditions); ok {
+				return true, subpath, token
+			}
+		}
+	}
+
+	return false, "", logger.Range{}
 }

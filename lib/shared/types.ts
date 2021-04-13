@@ -1,7 +1,7 @@
 export type Platform = 'browser' | 'node' | 'neutral';
 export type Format = 'iife' | 'cjs' | 'esm';
 export type Loader = 'js' | 'jsx' | 'ts' | 'tsx' | 'css' | 'json' | 'text' | 'base64' | 'file' | 'dataurl' | 'binary' | 'default';
-export type LogLevel = 'info' | 'warning' | 'error' | 'silent';
+export type LogLevel = 'debug' | 'info' | 'warning' | 'error' | 'silent';
 export type Charset = 'ascii' | 'utf8';
 export type TreeShaking = true | 'ignore-annotations';
 
@@ -57,7 +57,7 @@ export interface BuildOptions extends CommonOptions {
   banner?: { [type: string]: string };
   footer?: { [type: string]: string };
   incremental?: boolean;
-  entryPoints?: string[];
+  entryPoints?: string[] | Record<string, string>;
   stdin?: StdinOptions;
   plugins?: Plugin[];
   absWorkingDir?: string;
@@ -180,7 +180,7 @@ export interface TransformFailure extends Error {
 
 export interface Plugin {
   name: string;
-  setup: (build: PluginBuild) => void;
+  setup: (build: PluginBuild) => (void | Promise<void>);
 }
 
 export interface PluginBuild {

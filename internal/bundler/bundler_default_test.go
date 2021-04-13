@@ -1703,7 +1703,7 @@ func TestRuntimeNameCollisionNoBundle(t *testing.T) {
 	})
 }
 
-func TestTopLevelReturnForbiddenImport(t *testing.T) {
+func TestTopLevelReturnAllowedImport(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -1716,9 +1716,6 @@ func TestTopLevelReturnForbiddenImport(t *testing.T) {
 			Mode:          config.ModePassThrough,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `entry.js: error: Top-level return cannot be used inside an ECMAScript module
-entry.js: note: This file is considered an ECMAScript module because of the "import" keyword here
-`,
 	})
 }
 
@@ -1868,7 +1865,7 @@ func TestThisWithES6Syntax(t *testing.T) {
 				import './es6-ns-export-namespace'
 				import './es6-ns-export-class'
 				import './es6-ns-export-abstract-class'
-				`,
+			`,
 			"/dummy.js": `export const dummy = 123`,
 			"/cjs.js":   `console.log(this)`,
 
@@ -2779,7 +2776,7 @@ func TestNoOverwriteInputFileError(t *testing.T) {
 	})
 }
 
-func TestDuplicateEntryPointError(t *testing.T) {
+func TestDuplicateEntryPoint(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -2791,8 +2788,6 @@ func TestDuplicateEntryPointError(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out.js",
 		},
-		expectedScanLog: `error: Duplicate entry point "entry.js"
-`,
 	})
 }
 
@@ -3256,7 +3251,7 @@ entry.js: note: The top-level await in "entry.js" is here
 	})
 }
 
-func TestTopLevelAwaitForbiddenImportWithoutSplitting(t *testing.T) {
+func TestTopLevelAwaitAllowedImportWithoutSplitting(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -3282,18 +3277,6 @@ func TestTopLevelAwaitForbiddenImportWithoutSplitting(t *testing.T) {
 			OutputFormat:  config.FormatESModule,
 			AbsOutputFile: "/out.js",
 		},
-		expectedScanLog: `entry.js: error: This dynamic import is not allowed because the transitive dependency "c.js" contains a top-level await (enable code splitting to allow this)
-a.js: note: The file "a.js" imports the file "b.js" here
-b.js: note: The file "b.js" imports the file "c.js" here
-c.js: note: The top-level await in "c.js" is here
-entry.js: error: This dynamic import is not allowed because the transitive dependency "c.js" contains a top-level await (enable code splitting to allow this)
-b.js: note: The file "b.js" imports the file "c.js" here
-c.js: note: The top-level await in "c.js" is here
-entry.js: error: This dynamic import is not allowed because the imported file "c.js" contains a top-level await (enable code splitting to allow this)
-c.js: note: The top-level await in "c.js" is here
-entry.js: error: This dynamic import is not allowed because the imported file "entry.js" contains a top-level await (enable code splitting to allow this)
-entry.js: note: The top-level await in "entry.js" is here
-`,
 	})
 }
 
@@ -3895,80 +3878,6 @@ func TestAvoidTDZNoBundle(t *testing.T) {
 				console.log(foo)
 				export class Bar {}
 				export let bar = 123
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			Mode:          config.ModePassThrough,
-			AbsOutputFile: "/out.js",
-		},
-	})
-}
-
-func TestProcessEnvNodeEnvWarning(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				console.log(
-					process.env.NODE_ENV,
-					process.env.NODE_ENV,
-				)
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			Mode:          config.ModeBundle,
-			AbsOutputFile: "/out.js",
-		},
-		expectedScanLog: `entry.js: warning: Define "process.env.NODE_ENV" when bundling for the browser
-`,
-	})
-}
-
-func TestProcessEnvNodeEnvWarningNode(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				console.log(process.env.NODE_ENV)
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			Mode:          config.ModeBundle,
-			AbsOutputFile: "/out.js",
-			Platform:      config.PlatformNode,
-		},
-	})
-}
-
-func TestProcessEnvNodeEnvWarningDefine(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"process.env.NODE_ENV": {
-			DefineFunc: func(args config.DefineArgs) js_ast.E {
-				return &js_ast.ENull{}
-			},
-		},
-	})
-	default_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				console.log(process.env.NODE_ENV)
-			`,
-		},
-		entryPaths: []string{"/entry.js"},
-		options: config.Options{
-			Mode:          config.ModeBundle,
-			AbsOutputFile: "/out.js",
-			Defines:       &defines,
-		},
-	})
-}
-
-func TestProcessEnvNodeEnvWarningNoBundle(t *testing.T) {
-	default_suite.expectBundled(t, bundled{
-		files: map[string]string{
-			"/entry.js": `
-				console.log(process.env.NODE_ENV)
 			`,
 		},
 		entryPaths: []string{"/entry.js"},

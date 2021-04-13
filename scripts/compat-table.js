@@ -128,6 +128,7 @@ mergeVersions('Class', { es2015: true })
 mergeVersions('Const', { es2015: true })
 mergeVersions('DefaultArgument', { es2015: true })
 mergeVersions('Destructuring', { es2015: true })
+mergeVersions('DynamicImport', { es2015: true })
 mergeVersions('ForOf', { es2015: true })
 mergeVersions('Generator', { es2015: true })
 mergeVersions('Let', { es2015: true })
@@ -164,10 +165,25 @@ mergeVersions('ExportStarAs', {
 mergeVersions('ImportMeta', {
   chrome64: true,
   edge79: true,
-  es2020: true,
   firefox62: true,
   ios12: true,
   node10_4: true, // From https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import.meta
+  safari11_1: true,
+})
+
+// Manually copied from https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/await
+mergeVersions('TopLevelAwait', {
+  chrome89: true,
+  node14_8: true,
+})
+
+// Manually copied from https://caniuse.com/es6-module-dynamic-import
+mergeVersions('DynamicImport', {
+  chrome63: true,
+  edge79: true,
+  firefox67: true,
+  ios11: true,
+  node13_2: true, // From https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import
   safari11_1: true,
 })
 

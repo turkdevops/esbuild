@@ -299,6 +299,27 @@ let pluginTests = {
     assert.strictEqual(result.default, 123)
   },
 
+  async modifyInitialOptionsAsync({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.what')
+    const output = path.join(testDir, 'out.js')
+    await writeFileAsync(input, `export default 123`)
+    await esbuild.build({
+      entryPoints: [input],
+      bundle: true,
+      outfile: output,
+      format: 'cjs',
+      plugins: [{
+        name: 'what',
+        async setup(build) {
+          await new Promise(r => setTimeout(r, 100))
+          build.initialOptions.loader = { '.what': 'js' }
+        },
+      }],
+    })
+    const result = require(output)
+    assert.strictEqual(result.default, 123)
+  },
+
   async basicLoader({ esbuild, testDir }) {
     const input = path.join(testDir, 'in.js')
     const custom = path.join(testDir, 'example.custom')
@@ -853,14 +874,33 @@ let pluginTests = {
       }],
     })
     assert.strictEqual(result.outputFiles.length, 4)
-    assert.strictEqual(result.outputFiles[0].path, path.join(testDir, 'input 1.js'))
-    assert.strictEqual(result.outputFiles[1].path, path.join(testDir, 'input 2.js'))
-    assert.strictEqual(result.outputFiles[2].path, path.join(testDir, 'input a_b.js'))
-    assert.strictEqual(result.outputFiles[3].path, path.join(testDir, 'c.d.js'))
+    assert.strictEqual(result.outputFiles[0].path, path.join(testDir, '1.js'))
+    assert.strictEqual(result.outputFiles[1].path, path.join(testDir, '2.js'))
+    assert.strictEqual(result.outputFiles[2].path, path.join(testDir, 'a_b.js'))
+    assert.strictEqual(result.outputFiles[3].path, path.join(testDir, 'a/b/c.d.js'))
     assert.strictEqual(result.outputFiles[0].text, `// virtual-ns:input 1\nconsole.log("input 1");\n`)
     assert.strictEqual(result.outputFiles[1].text, `// virtual-ns:input 2\nconsole.log("input 2");\n`)
     assert.strictEqual(result.outputFiles[2].text, `// virtual-ns:input a<>:"|?*b\nconsole.log('input a<>:"|?*b');\n`)
     assert.strictEqual(result.outputFiles[3].text, `// virtual-ns:input a/b/c.d.e\nconsole.log("input a/b/c.d.e");\n`)
+  },
+
+  async entryPointFileNamespace({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    let worked = false
+    await writeFileAsync(input, 'stuff')
+    await esbuild.build({
+      entryPoints: [input],
+      write: false,
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onResolve({ filter: /.*/, namespace: 'file' }, () => {
+            worked = true
+          })
+        },
+      }],
+    })
+    assert(worked)
   },
 
   async stdinImporter({ esbuild, testDir }) {
@@ -1822,6 +1862,61 @@ let pluginTests = {
       }],
     })
     assert.strictEqual(build.warnings.length, 0)
+  },
+
+  async onResolvePreserveOriginalEntryPointNameIssue945({ esbuild, testDir }) {
+    const build = await esbuild.build({
+      entryPoints: ['first'],
+      write: false,
+      logLevel: 'silent',
+      outdir: testDir,
+      plugins: [{
+        name: 'plugin',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, () => {
+            return { path: 'second', namespace: 'what' }
+          })
+          build.onLoad({ filter: /.*/ }, () => {
+            return { contents: `` }
+          })
+        },
+      }],
+    })
+    assert.strictEqual(build.outputFiles[0].path, path.join(testDir, 'first.js'))
+  },
+
+  async dynamicImportDuplicateChunkIssue1099({ esbuild, testDir }) {
+    const outdir = path.join(testDir, 'out')
+    await mkdirAsync(path.join(testDir, 'hi'), { recursive: true })
+    await writeFileAsync(path.join(testDir, 'index.js'), `import x from 'manifest'; console.log(x.name(), x.hi())`)
+    await writeFileAsync(path.join(testDir, 'name.js'), `import x from 'manifest'; console.log(x.index(), x.hi())`)
+    await writeFileAsync(path.join(testDir, 'hi', 'name.js'), `import x from 'manifest'; console.log(x.index(), x.name())`)
+    await esbuild.build({
+      entryPoints: [path.join(testDir, 'index.js')],
+      outdir,
+      bundle: true,
+      splitting: true,
+      format: 'esm',
+      plugins: [{
+        name: 'plugin',
+        setup(build) {
+          build.onResolve({ filter: /^manifest$/ }, () => {
+            return { path: 'manifest', namespace: 'Manifest' }
+          })
+          build.onLoad({ namespace: 'Manifest', filter: /.*/ }, () => {
+            return {
+              resolveDir: testDir,
+              contents: `
+                export const index = () => import('./index')
+                export const name = () => import('./name')
+                export const hi = () => import('./hi/name')
+                export default {index, name, hi}
+              `,
+            }
+          })
+        },
+      }],
+    })
   },
 }
 

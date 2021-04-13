@@ -14,10 +14,10 @@ test-all:
 	make -j6 test-common ts-type-tests test-wasm-node test-wasm-browser lib-typecheck
 
 # This includes tests of some 3rd-party libraries, which can be very slow
-test-prepublish: check-go-version test-all test-preact-splitting test-sucrase bench-rome-esbuild test-esprima test-rollup
+test-prepublish: check-go-version test-all test-preact-splitting test-sucrase bench-rome-esbuild bench-readmin-esbuild test-esprima test-rollup
 
 check-go-version:
-	@go version | grep ' go1\.16\.2 ' || (echo 'Please install Go version 1.16.2' && false)
+	@go version | grep ' go1\.16\.3 ' || (echo 'Please install Go version 1.16.3' && false)
 
 # This "ESBUILD_RACE" variable exists at the request of a user on GitHub who
 # wants to run "make test" on an unsupported version of macOS (version 10.9).
@@ -114,7 +114,8 @@ platform-all: cmd/esbuild/version.go test-all
 		platform-linux-mips64le \
 		platform-linux-ppc64le \
 		platform-wasm \
-		platform-neutral
+		platform-neutral \
+		platform-deno
 
 platform-windows:
 	cd npm/esbuild-windows-64 && npm version "$(ESBUILD_VERSION)" --allow-same-version
@@ -170,6 +171,9 @@ platform-wasm: esbuild | scripts/node_modules
 platform-neutral: esbuild lib-typecheck | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
 	node scripts/esbuild.js ./esbuild
+
+platform-deno: esbuild lib-typecheck | scripts/node_modules
+	node scripts/esbuild.js ./esbuild --deno
 
 test-otp:
 	test -n "$(OTP)" && echo publish --otp="$(OTP)"
@@ -816,7 +820,6 @@ bench-readmin: bench-readmin-esbuild
 
 READMIN_ESBUILD_FLAGS += --bundle
 READMIN_ESBUILD_FLAGS += --define:global=window
-READMIN_ESBUILD_FLAGS += --define:process.env.NODE_ENV='"production"'
 READMIN_ESBUILD_FLAGS += --loader:.js=jsx
 READMIN_ESBUILD_FLAGS += --minify
 READMIN_ESBUILD_FLAGS += --sourcemap

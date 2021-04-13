@@ -197,8 +197,9 @@ func (p *parser) markLoweredSyntaxFeature(feature compat.JSFeature, r logger.Ran
 	}
 }
 
-func (p *parser) isPrivateUnsupported(private *js_ast.EPrivateIdentifier) bool {
-	return p.options.unsupportedJSFeatures.Has(p.symbols[private.Ref.InnerIndex].Kind.Feature())
+func (p *parser) privateSymbolNeedsToBeLowered(private *js_ast.EPrivateIdentifier) bool {
+	symbol := &p.symbols[private.Ref.InnerIndex]
+	return p.options.unsupportedJSFeatures.Has(symbol.Kind.Feature()) || symbol.PrivateSymbolMustBeLowered
 }
 
 func (p *parser) captureThis() js_ast.Ref {
@@ -263,7 +264,7 @@ func (p *parser) lowerFunction(
 		for i, arg := range *args {
 			if bindingHasObjectRest(arg.Binding) {
 				ref := p.generateTempRef(tempRefNoDeclare, "")
-				target := p.convertBindingToExpr(arg.Binding, nil)
+				target := js_ast.ConvertBindingToExpr(arg.Binding, nil)
 				init := js_ast.Expr{Loc: arg.Binding.Loc, Data: &js_ast.EIdentifier{Ref: ref}}
 				p.recordUsage(ref)
 
@@ -481,7 +482,7 @@ flatten:
 			// itself will have to be lowered even if the language target supports
 			// optional chaining. This is because there's no way to use our shim
 			// function for private names with optional chaining syntax.
-			if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.isPrivateUnsupported(private) {
+			if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.privateSymbolNeedsToBeLowered(private) {
 				containsPrivateName = true
 			}
 
@@ -585,7 +586,7 @@ flatten:
 
 					// Capture the value of "this" if the target of the starting call
 					// expression is a private property access
-					if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.isPrivateUnsupported(private) {
+					if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.privateSymbolNeedsToBeLowered(private) {
 						// "foo().#bar?.()" must capture "foo()" for "this"
 						expr = p.lowerPrivateGet(targetFunc(), e.Index.Loc, private)
 						thisArg = targetFunc()
@@ -633,7 +634,7 @@ flatten:
 			}}
 
 		case *js_ast.EIndex:
-			if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.isPrivateUnsupported(private) {
+			if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.privateSymbolNeedsToBeLowered(private) {
 				// If this is private name property access inside a call expression and
 				// the call expression is part of this chain, then the call expression
 				// is going to need a copy of the property access target as the value
@@ -884,15 +885,15 @@ func (p *parser) lowerNullishCoalescing(loc logger.Loc, left js_ast.Expr, right 
 }
 
 // Lower object spread for environments that don't support them. Non-spread
-// properties are grouped into object literals and then passed to "__assign"
+// properties are grouped into object literals and then passed to "__objSpread"
 // like this:
 //
-//   "{a, b, ...c, d, e}" => "__assign(__assign(__assign({a, b}, c), {d, e})"
+//   "{a, b, ...c, d, e}" => "__objSpread(__objSpread(__objSpread({a, b}, c), {d, e})"
 //
 // If the object literal starts with a spread, then we pass an empty object
-// literal to "__assign" to make sure we clone the object:
+// literal to "__objSpread" to make sure we clone the object:
 //
-//   "{...a, b}" => "__assign(__assign({}, a), {b})"
+//   "{...a, b}" => "__objSpread(__objSpread({}, a), {b})"
 //
 // It's not immediately obvious why we don't compile everything to a single
 // call to "Object.assign". After all, "Object.assign" can take any number of
@@ -939,14 +940,14 @@ func (p *parser) lowerObjectSpread(loc logger.Loc, e *js_ast.EObject) js_ast.Exp
 
 		if len(properties) > 0 || result.Data == nil {
 			if result.Data == nil {
-				// "{a, ...b}" => "__assign({a}, b)"
+				// "{a, ...b}" => "__objSpread({a}, b)"
 				result = js_ast.Expr{Loc: loc, Data: &js_ast.EObject{
 					Properties:   properties,
 					IsSingleLine: e.IsSingleLine,
 				}}
 			} else {
-				// "{...a, b, ...c}" => "__assign(__assign(__assign({}, a), {b}), c)"
-				result = p.callRuntime(loc, "__assign",
+				// "{...a, b, ...c}" => "__objSpread(__objSpread(__objSpread({}, a), {b}), c)"
+				result = p.callRuntime(loc, "__objSpread",
 					[]js_ast.Expr{result, {Loc: loc, Data: &js_ast.EObject{
 						Properties:   properties,
 						IsSingleLine: e.IsSingleLine,
@@ -955,13 +956,13 @@ func (p *parser) lowerObjectSpread(loc logger.Loc, e *js_ast.EObject) js_ast.Exp
 			properties = []js_ast.Property{}
 		}
 
-		// "{a, ...b}" => "__assign({a}, b)"
-		result = p.callRuntime(loc, "__assign", []js_ast.Expr{result, *property.Value})
+		// "{a, ...b}" => "__objSpread({a}, b)"
+		result = p.callRuntime(loc, "__objSpread", []js_ast.Expr{result, *property.Value})
 	}
 
 	if len(properties) > 0 {
-		// "{...a, b}" => "__assign(__assign({}, a), {b})"
-		result = p.callRuntime(loc, "__assign", []js_ast.Expr{result, {Loc: loc, Data: &js_ast.EObject{
+		// "{...a, b}" => "__objSpread(__objSpread({}, a), {b})"
+		result = p.callRuntime(loc, "__objSpread", []js_ast.Expr{result, {Loc: loc, Data: &js_ast.EObject{
 			Properties:   properties,
 			IsSingleLine: e.IsSingleLine,
 		}}})
@@ -1076,7 +1077,7 @@ func (p *parser) lowerPrivateSetBinOp(target js_ast.Expr, loc logger.Loc, privat
 // the language target is such that private members must be lowered
 func (p *parser) extractPrivateIndex(target js_ast.Expr) (js_ast.Expr, logger.Loc, *js_ast.EPrivateIdentifier) {
 	if index, ok := target.Data.(*js_ast.EIndex); ok {
-		if private, ok := index.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.isPrivateUnsupported(private) {
+		if private, ok := index.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.privateSymbolNeedsToBeLowered(private) {
 			return index.Target, index.Index.Loc, private
 		}
 	}
@@ -1135,7 +1136,7 @@ func (p *parser) lowerObjectRestInDecls(decls []js_ast.Decl) []js_ast.Decl {
 			clone := append([]js_ast.Decl{}, decls[:i]...)
 			for _, decl := range decls[i:] {
 				if decl.Value != nil {
-					target := p.convertBindingToExpr(decl.Binding, nil)
+					target := js_ast.ConvertBindingToExpr(decl.Binding, nil)
 					if result, ok := p.lowerObjectRestToDecls(target, *decl.Value, clone); ok {
 						clone = result
 						continue
@@ -1224,7 +1225,7 @@ func (p *parser) lowerAssign(rootExpr js_ast.Expr, rootInit js_ast.Expr, mode ob
 
 	var expr js_ast.Expr
 	assign := func(left js_ast.Expr, right js_ast.Expr) {
-		expr = maybeJoinWithComma(expr, js_ast.Assign(left, right))
+		expr = js_ast.JoinWithComma(expr, js_ast.Assign(left, right))
 	}
 
 	if initWrapFunc, ok := p.lowerObjectRestHelper(rootExpr, rootInit, assign, tempRefNeedsDeclare, mode); ok {
@@ -1253,7 +1254,7 @@ func (p *parser) lowerPrivateInAssign(expr js_ast.Expr) (js_ast.Expr, bool) {
 
 	case *js_ast.EIndex:
 		// "[a.#b] = [c]" => "[__privateAssign(a, #b)._] = [c]"
-		if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.isPrivateUnsupported(private) {
+		if private, ok := e.Index.Data.(*js_ast.EPrivateIdentifier); ok && p.privateSymbolNeedsToBeLowered(private) {
 			var target js_ast.Expr
 
 			switch p.symbols[private.Ref.InnerIndex].Kind {
@@ -1374,13 +1375,6 @@ func (p *parser) lowerObjectRestHelper(
 	var visit func(js_ast.Expr, js_ast.Expr, []func() js_ast.Expr)
 
 	captureIntoRef := func(expr js_ast.Expr) js_ast.Ref {
-		if id, ok := expr.Data.(*js_ast.EIdentifier); ok {
-			return id.Ref
-		}
-
-		// If the initializer isn't already a bare identifier that we can
-		// reference, store the initializer first so we can reference it later.
-		// The initializer may have side effects so we must evaluate it once.
 		ref := p.generateTempRef(declare, "")
 		assign(js_ast.Expr{Loc: expr.Loc, Data: &js_ast.EIdentifier{Ref: ref}}, expr)
 		p.recordUsage(ref)
@@ -1407,13 +1401,13 @@ func (p *parser) lowerObjectRestHelper(
 			p.recordUsage(ref)
 		}
 
-		// Call "__rest" to clone the initializer without the keys for previous
+		// Call "__objRest" to clone the initializer without the keys for previous
 		// properties, then assign the result to the binding for the rest pattern
 		keysToExclude := make([]js_ast.Expr, len(capturedKeys))
 		for i, capturedKey := range capturedKeys {
 			keysToExclude[i] = capturedKey()
 		}
-		assign(binding, p.callRuntime(binding.Loc, "__rest", []js_ast.Expr{init,
+		assign(binding, p.callRuntime(binding.Loc, "__objRest", []js_ast.Expr{init,
 			{Loc: binding.Loc, Data: &js_ast.EArray{Items: keysToExclude, IsSingleLine: isSingleLine}}}))
 	}
 
@@ -1573,7 +1567,7 @@ func (p *parser) lowerObjectRestHelper(
 	//
 	//   // Output:
 	//   var _a;
-	//   console.log((x = __rest(_a = x, []), _a));
+	//   console.log((x = __objRest(_a = x, []), _a));
 	//
 	// This isn't necessary if the return value is unused:
 	//
@@ -1581,7 +1575,7 @@ func (p *parser) lowerObjectRestHelper(
 	//   ({...x} = x);
 	//
 	//   // Output:
-	//   x = __rest(x, []);
+	//   x = __objRest(x, []);
 	//
 	if mode == objRestMustReturnInitExpr {
 		initFunc, initWrapFunc := p.captureValueWithPossibleSideEffects(rootInit.Loc, 2, rootInit, valueCouldBeMutated)
@@ -1595,7 +1589,7 @@ func (p *parser) lowerObjectRestHelper(
 	return wrapFunc, true
 }
 
-// Save a copy of the key for the call to "__rest" later on. Certain
+// Save a copy of the key for the call to "__objRest" later on. Certain
 // expressions can be converted to keys more efficiently than others.
 func (p *parser) captureKeyForObjectRest(originalKey js_ast.Expr) (finalKey js_ast.Expr, capturedKey func() js_ast.Expr) {
 	loc := originalKey.Loc
@@ -1633,6 +1627,203 @@ func (p *parser) captureKeyForObjectRest(originalKey js_ast.Expr) (finalKey js_a
 		capturedKey = func() js_ast.Expr {
 			p.recordUsage(tempRef)
 			return p.callRuntime(loc, "__restKey", []js_ast.Expr{{Loc: loc, Data: &js_ast.EIdentifier{Ref: tempRef}}})
+		}
+	}
+
+	return
+}
+
+type classLoweringInfo struct {
+	useDefineForClassFields bool
+	avoidTDZ                bool
+	lowerAllInstanceFields  bool
+	lowerAllStaticFields    bool
+}
+
+func (p *parser) computeClassLoweringInfo(class *js_ast.Class) (result classLoweringInfo) {
+	// TypeScript has legacy behavior that uses assignment semantics instead of
+	// define semantics for class fields by default. This happened before class
+	// fields were added to JavaScript, but then TC39 decided to go with define
+	// semantics for class fields instead, leaving TypeScript to deal with the
+	// incorrect assignment semantics. This behaves differently if the base class
+	// has a setter with the same name.
+	result.useDefineForClassFields = p.options.useDefineForClassFields != config.False
+
+	// Safari workaround: Automatically avoid TDZ issues when bundling
+	result.avoidTDZ = p.options.mode == config.ModeBundle && p.currentScope.Parent == nil
+
+	// Conservatively lower fields of a given type (instance or static) when any
+	// member of that type needs to be lowered. This must be done to preserve
+	// evaluation order. For example:
+	//
+	//   class Foo {
+	//     #foo = 123
+	//     bar = this.#foo
+	//   }
+	//
+	// It would be bad if we transformed that into something like this:
+	//
+	//   var _foo;
+	//   class Foo {
+	//     constructor() {
+	//       _foo.set(this, 123);
+	//     }
+	//     bar = __privateGet(this, _foo);
+	//   }
+	//   _foo = new WeakMap();
+	//
+	// That evaluates "bar" then "foo" instead of "foo" then "bar" like the
+	// original code. We need to do this instead:
+	//
+	//   var _foo;
+	//   class Foo {
+	//     constructor() {
+	//       _foo.set(this, 123);
+	//       __publicField(this, "bar", __privateGet(this, _foo));
+	//     }
+	//   }
+	//   _foo = new WeakMap();
+	//
+	for _, prop := range class.Properties {
+		if private, ok := prop.Key.Data.(*js_ast.EPrivateIdentifier); ok {
+			if prop.IsStatic {
+				if p.privateSymbolNeedsToBeLowered(private) {
+					result.lowerAllStaticFields = true
+				}
+
+				// Be conservative and always lower static fields when we're doing TDZ-
+				// avoidance if the class's shadowing symbol is referenced at all (i.e.
+				// the class name within the class body, which can be referenced by name
+				// or by "this" in a static initializer). We can't transform this:
+				//
+				//   class Foo {
+				//     static #foo = new Foo();
+				//   }
+				//
+				// into this:
+				//
+				//   var Foo = class {
+				//     static #foo = new Foo();
+				//   };
+				//
+				// since "new Foo" will crash. We need to lower this static field to avoid
+				// crashing due to an uninitialized binding.
+				if result.avoidTDZ {
+					// Note that due to esbuild's single-pass design where private fields
+					// are lowered as they are resolved, we must decide whether to lower
+					// these private fields before we enter the class body. We can't wait
+					// until we've scanned the class body and know if the shadowing symbol
+					// is used or not before we decide, because if "#foo" does need to be
+					// lowered, references to "#foo" inside the class body weren't lowered.
+					// So we just unconditionally do this instead.
+					result.lowerAllStaticFields = true
+				}
+			} else {
+				if p.privateSymbolNeedsToBeLowered(private) {
+					result.lowerAllInstanceFields = true
+
+					// We can't transform this:
+					//
+					//   class Foo {
+					//     #foo = 123
+					//     static bar = new Foo().#foo
+					//   }
+					//
+					// into this:
+					//
+					//   var _foo;
+					//   const _Foo = class {
+					//     constructor() {
+					//       _foo.set(this, 123);
+					//     }
+					//     static bar = __privateGet(new _Foo(), _foo);
+					//   };
+					//   let Foo = _Foo;
+					//   _foo = new WeakMap();
+					//
+					// because "_Foo" won't be initialized in the initializer for "bar".
+					// So we currently lower all static fields in this case too. This
+					// isn't great and it would be good to find a way to avoid this.
+					// The shadowing symbol substitution mechanism should probably be
+					// rethought.
+					result.lowerAllStaticFields = true
+				}
+			}
+			continue
+		}
+
+		// This doesn't come before the private member check above because
+		// unsupported private methods must also trigger field lowering:
+		//
+		//   class Foo {
+		//     bar = this.#foo()
+		//     #foo() {}
+		//   }
+		//
+		// It would be bad if we transformed that to something like this:
+		//
+		//   var _foo, foo_fn;
+		//   class Foo {
+		//     constructor() {
+		//       _foo.add(this);
+		//     }
+		//     bar = __privateMethod(this, _foo, foo_fn).call(this);
+		//   }
+		//   _foo = new WeakSet();
+		//   foo_fn = function() {
+		//   };
+		//
+		// In that case the initializer of "bar" would fail to call "#foo" because
+		// it's only added to the instance in the body of the constructor.
+		if prop.IsMethod {
+			continue
+		}
+
+		if prop.IsStatic {
+			// Static fields must be lowered if the target doesn't support them
+			if p.options.unsupportedJSFeatures.Has(compat.ClassStaticField) {
+				result.lowerAllStaticFields = true
+			}
+
+			// Convert static fields to assignment statements if the TypeScript
+			// setting for this is enabled. I don't think this matters for private
+			// fields because there's no way for this to call a setter in the base
+			// class, so this isn't done for private fields.
+			if p.options.ts.Parse && !result.useDefineForClassFields {
+				result.lowerAllStaticFields = true
+			}
+
+			// Be conservative and always lower static fields when we're doing TDZ-
+			// avoidance. We can't transform this:
+			//
+			//   class Foo {
+			//     static foo = new Foo();
+			//   }
+			//
+			// into this:
+			//
+			//   var Foo = class {
+			//     static foo = new Foo();
+			//   };
+			//
+			// since "new Foo" will crash. We need to lower this static field to avoid
+			// crashing due to an uninitialized binding.
+			if result.avoidTDZ {
+				result.lowerAllStaticFields = true
+			}
+		} else {
+			// Instance fields must be lowered if the target doesn't support them
+			if p.options.unsupportedJSFeatures.Has(compat.ClassField) {
+				result.lowerAllInstanceFields = true
+			}
+
+			// Convert instance fields to assignment statements if the TypeScript
+			// setting for this is enabled. I don't think this matters for private
+			// fields because there's no way for this to call a setter in the base
+			// class, so this isn't done for private fields.
+			if p.options.ts.Parse && !result.useDefineForClassFields {
+				result.lowerAllInstanceFields = true
+			}
 		}
 	}
 
@@ -1776,8 +1967,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 		}
 	}
 
-	// Safari workaround: Automatically avoid TDZ issues when bundling
-	avoidTDZ := p.options.mode == config.ModeBundle && p.currentScope.Parent == nil
+	classLoweringInfo := p.computeClassLoweringInfo(class)
 
 	for _, prop := range class.Properties {
 		// Merge parameter decorators with method decorators
@@ -1789,13 +1979,13 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 				}
 				for i, arg := range fn.Fn.Args {
 					for _, decorator := range arg.TSDecorators {
-						// Generate a call to "__param()" for this parameter decorator
+						// Generate a call to "__decorateParam()" for this parameter decorator
 						var decorators *[]js_ast.Expr = &prop.TSDecorators
 						if isConstructor {
 							decorators = &class.TSDecorators
 						}
 						*decorators = append(*decorators,
-							p.callRuntime(decorator.Loc, "__param", []js_ast.Expr{
+							p.callRuntime(decorator.Loc, "__decorateParam", []js_ast.Expr{
 								{Loc: decorator.Loc, Data: &js_ast.ENumber{Value: float64(i)}},
 								decorator,
 							}),
@@ -1811,19 +2001,18 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 		// However, the TypeScript compiler doesn't remove the field when doing
 		// strict class field initialization, so we shouldn't either.
 		private, _ := prop.Key.Data.(*js_ast.EPrivateIdentifier)
-		mustLowerPrivate := private != nil && p.isPrivateUnsupported(private)
+		mustLowerPrivate := private != nil && p.privateSymbolNeedsToBeLowered(private)
 		shouldOmitFieldInitializer := p.options.ts.Parse && !prop.IsMethod && prop.Initializer == nil &&
-			!p.options.useDefineForClassFields && !mustLowerPrivate
+			!classLoweringInfo.useDefineForClassFields && !mustLowerPrivate
 
 		// Class fields must be lowered if the environment doesn't support them
-		mustLowerField := !prop.IsMethod &&
-			((!prop.IsStatic && p.options.unsupportedJSFeatures.Has(compat.ClassField)) ||
-				(prop.IsStatic && p.options.unsupportedJSFeatures.Has(compat.ClassStaticField)))
-
-		// Be conservative and always lower static fields when we're doing TDZ-
-		// avoidance and the shadowing name for the class was captured somewhere.
-		if !prop.IsMethod && prop.IsStatic && avoidTDZ && shadowRef != js_ast.InvalidRef {
-			mustLowerField = true
+		mustLowerField := false
+		if !prop.IsMethod {
+			if prop.IsStatic {
+				mustLowerField = classLoweringInfo.lowerAllStaticFields
+			} else {
+				mustLowerField = classLoweringInfo.lowerAllInstanceFields
+			}
 		}
 
 		// Make sure the order of computed property keys doesn't change. These
@@ -1838,11 +2027,11 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 
 			if !needsKey {
 				// Just evaluate the key for its side effects
-				computedPropertyCache = maybeJoinWithComma(computedPropertyCache, prop.Key)
+				computedPropertyCache = js_ast.JoinWithComma(computedPropertyCache, prop.Key)
 			} else {
 				// Store the key in a temporary so we can assign to it later
 				ref := p.generateTempRef(tempRefNeedsDeclare, "")
-				computedPropertyCache = maybeJoinWithComma(computedPropertyCache,
+				computedPropertyCache = js_ast.JoinWithComma(computedPropertyCache,
 					js_ast.Assign(js_ast.Expr{Loc: prop.Key.Loc, Data: &js_ast.EIdentifier{Ref: ref}}, prop.Key))
 				prop.Key = js_ast.Expr{Loc: prop.Key.Loc, Data: &js_ast.EIdentifier{Ref: ref}}
 				keyExprNoSideEffects = prop.Key
@@ -1859,7 +2048,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 
 		// Handle decorators
 		if p.options.ts.Parse {
-			// Generate a single call to "__decorate()" for this property
+			// Generate a single call to "__decorateClass()" for this property
 			if len(prop.TSDecorators) > 0 {
 				loc := prop.Key.Loc
 
@@ -1876,7 +2065,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 					panic("Internal error")
 				}
 
-				// This code tells "__decorate()" if the descriptor should be undefined
+				// This code tells "__decorateClass()" if the descriptor should be undefined
 				descriptorKind := float64(1)
 				if !prop.IsMethod {
 					descriptorKind = 2
@@ -1890,7 +2079,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 					target = js_ast.Expr{Loc: loc, Data: &js_ast.EDot{Target: nameFunc(), Name: "prototype", NameLoc: loc}}
 				}
 
-				decorator := p.callRuntime(loc, "__decorate", []js_ast.Expr{
+				decorator := p.callRuntime(loc, "__decorateClass", []js_ast.Expr{
 					{Loc: loc, Data: &js_ast.EArray{Items: prop.TSDecorators}},
 					target,
 					descriptorKey,
@@ -1906,11 +2095,10 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 			}
 		}
 
-		// Instance and static fields are a JavaScript feature, not just a
-		// TypeScript feature. Move their initializers from the class body to
-		// either the constructor (instance fields) or after the class (static
-		// fields).
-		if !prop.IsMethod && (mustLowerField || (p.options.ts.Parse && !p.options.useDefineForClassFields && (!prop.IsStatic || private == nil))) {
+		// Handle lowering of instance and static fields. Move their initializers
+		// from the class body to either the constructor (instance fields) or after
+		// the class (static fields).
+		if !prop.IsMethod && mustLowerField {
 			// The TypeScript compiler doesn't follow the JavaScript spec for
 			// uninitialized fields. They are supposed to be set to undefined but the
 			// TypeScript compiler just omits them entirely.
@@ -1964,7 +2152,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 						},
 					}}
 					p.recordUsage(ref)
-				} else if private == nil && p.options.useDefineForClassFields {
+				} else if private == nil && classLoweringInfo.useDefineForClassFields {
 					if _, ok := init.Data.(*js_ast.EUndefined); ok {
 						expr = p.callRuntime(loc, "__publicField", []js_ast.Expr{target, prop.Key})
 					} else {
@@ -2005,7 +2193,6 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 			prop.Initializer = nil
 		}
 
-		// Remember where the constructor is for later
 		if prop.IsMethod {
 			if mustLowerPrivate {
 				loc := prop.Key.Loc
@@ -2079,6 +2266,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 				continue
 			} else if key, ok := prop.Key.Data.(*js_ast.EString); ok && js_lexer.UTF16EqualsString(key.Value, "constructor") {
 				if fn, ok := prop.Value.Data.(*js_ast.EFunction); ok {
+					// Remember where the constructor is for later
 					ctor = fn
 
 					// Initialize TypeScript constructor parameter fields
@@ -2227,7 +2415,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 	var stmts []js_ast.Stmt
 	var nameForClassDecorators js_ast.LocRef
 	generatedLocalStmt := false
-	if len(class.TSDecorators) > 0 || hasPotentialShadowCaptureEscape || avoidTDZ {
+	if len(class.TSDecorators) > 0 || hasPotentialShadowCaptureEscape || classLoweringInfo.avoidTDZ {
 		generatedLocalStmt = true
 		name := nameFunc()
 		nameRef := name.Data.(*js_ast.EIdentifier).Ref
@@ -2345,7 +2533,7 @@ func (p *parser) lowerClass(stmt js_ast.Stmt, expr js_ast.Expr, shadowRef js_ast
 	if len(class.TSDecorators) > 0 {
 		stmts = append(stmts, js_ast.AssignStmt(
 			js_ast.Expr{Loc: nameForClassDecorators.Loc, Data: &js_ast.EIdentifier{Ref: nameForClassDecorators.Ref}},
-			p.callRuntime(classLoc, "__decorate", []js_ast.Expr{
+			p.callRuntime(classLoc, "__decorateClass", []js_ast.Expr{
 				{Loc: classLoc, Data: &js_ast.EArray{Items: class.TSDecorators}},
 				{Loc: nameForClassDecorators.Loc, Data: &js_ast.EIdentifier{Ref: nameForClassDecorators.Ref}},
 			}),

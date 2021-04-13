@@ -63,7 +63,7 @@ func expectPrintedCommon(t *testing.T, contents string, expected string, options
 			t.Fatal("Parse error")
 		}
 		symbols := js_ast.NewSymbolMap(1)
-		symbols.Outer[0] = tree.Symbols
+		symbols.SymbolsForSource[0] = tree.Symbols
 		r := renamer.NewNoOpRenamer(symbols)
 		js := js_printer.Print(tree, symbols, r, js_printer.Options{
 			UnsupportedFeatures: options.UnsupportedJSFeatures,
@@ -2677,7 +2677,7 @@ func TestMangleBooleanWithSideEffects(t *testing.T) {
 		expectPrintedMangle(t, "y(x && "+value+")", "y(x && "+value+");\n")
 		expectPrintedMangle(t, "y(x || "+value+")", "y(x || "+value+");\n")
 
-		expectPrintedMangle(t, "y(!(x && "+value+"))", "y((x, true));\n")
+		expectPrintedMangle(t, "y(!(x && "+value+"))", "y(!(x && "+value+"));\n")
 		expectPrintedMangle(t, "y(!(x || "+value+"))", "y(!x);\n")
 
 		expectPrintedMangle(t, "if (x && "+value+") y", "x;\n")
@@ -2698,7 +2698,7 @@ func TestMangleBooleanWithSideEffects(t *testing.T) {
 		expectPrintedMangle(t, "y(x || "+value+")", "y(x || "+value+");\n")
 
 		expectPrintedMangle(t, "y(!(x && "+value+"))", "y(!x);\n")
-		expectPrintedMangle(t, "y(!(x || "+value+"))", "y((x, false));\n")
+		expectPrintedMangle(t, "y(!(x || "+value+"))", "y(!(x || "+value+"));\n")
 
 		expectPrintedMangle(t, "if (x && "+value+") y", "x && y;\n")
 		expectPrintedMangle(t, "if (x || "+value+") y", "x, y;\n")
@@ -2720,7 +2720,7 @@ func TestMangleBooleanWithSideEffects(t *testing.T) {
 		expectPrintedMangle(t, "y(x && "+value+")", "y(x && "+value+");\n")
 		expectPrintedMangle(t, "y(x || "+value+")", "y(x || "+value+");\n")
 
-		expectPrintedMangle(t, "y(!(x && "+value+"))", "y((x, !"+value+"));\n")
+		expectPrintedMangle(t, "y(!(x && "+value+"))", "y(!(x && "+value+"));\n")
 		expectPrintedMangle(t, "y(!(x || "+value+"))", "y(!(x || "+value+"));\n")
 
 		expectPrintedMangle(t, "if (x || "+value+") y", "(x || "+value+") && y;\n")
@@ -2735,7 +2735,7 @@ func TestMangleBooleanWithSideEffects(t *testing.T) {
 		expectPrintedMangle(t, "y(x && "+value+")", "y(x && "+value+");\n")
 		expectPrintedMangle(t, "y(x || "+value+")", "y(x || "+value+");\n")
 
-		expectPrintedMangle(t, "y(!(x || "+value+"))", "y((x, !"+value+"));\n")
+		expectPrintedMangle(t, "y(!(x || "+value+"))", "y(!(x || "+value+"));\n")
 		expectPrintedMangle(t, "y(!(x && "+value+"))", "y(!(x && "+value+"));\n")
 
 		expectPrintedMangle(t, "if (x && "+value+") y", "x && "+value+" && y;\n")

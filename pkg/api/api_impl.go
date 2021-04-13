@@ -19,6 +19,7 @@ import (
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
 	"github.com/evanw/esbuild/internal/fs"
+	"github.com/evanw/esbuild/internal/graph"
 	"github.com/evanw/esbuild/internal/js_ast"
 	"github.com/evanw/esbuild/internal/js_lexer"
 	"github.com/evanw/esbuild/internal/js_parser"
@@ -148,6 +149,8 @@ func validateColor(value StderrColor) logger.UseColor {
 
 func validateLogLevel(value LogLevel) logger.LogLevel {
 	switch value {
+	case LogLevelDebug:
+		return logger.LevelDebug
 	case LogLevelInfo:
 		return logger.LevelInfo
 	case LogLevelWarning:
@@ -396,13 +399,15 @@ func validateJSX(log logger.Log, text string, name string) []string {
 	return parts
 }
 
-func validateDefines(log logger.Log, defines map[string]string, pureFns []string) (*config.ProcessedDefines, []config.InjectedDefine) {
-	if len(defines) == 0 && len(pureFns) == 0 {
-		return nil, nil
-	}
-
+func validateDefines(
+	log logger.Log,
+	defines map[string]string,
+	pureFns []string,
+	platform Platform,
+	minify bool,
+) (*config.ProcessedDefines, []config.InjectedDefine) {
 	rawDefines := make(map[string]config.DefineData)
-	valueToInject := make(map[string]config.InjectedDefine)
+	var valueToInject map[string]config.InjectedDefine
 	var definesToInject []string
 
 	for key, value := range defines {
@@ -422,12 +427,6 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 					DefineFunc: func(args config.DefineArgs) js_ast.E {
 						return &js_ast.EIdentifier{Ref: args.FindSymbol(args.Loc, name)}
 					},
-				}
-
-				// Try to be helpful for common mistakes
-				if key == "process.env.NODE_ENV" {
-					log.AddWarning(nil, logger.Loc{}, fmt.Sprintf(
-						"%q is defined as an identifier instead of a string (surround %q with double quotes to get a string)", key, value))
 				}
 				continue
 			}
@@ -456,6 +455,9 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 		// These values are extracted into a shared symbol reference
 		case *js_ast.EArray, *js_ast.EObject:
 			definesToInject = append(definesToInject, key)
+			if valueToInject == nil {
+				valueToInject = make(map[string]config.InjectedDefine)
+			}
 			valueToInject[key] = config.InjectedDefine{Source: source, Data: e, Name: key}
 			continue
 		}
@@ -465,14 +467,43 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 
 	// Sort injected defines for determinism, since the imports will be injected
 	// into every file in the order that we return them from this function
-	injectedDefines := make([]config.InjectedDefine, len(definesToInject))
-	sort.Strings(definesToInject)
-	for i, key := range definesToInject {
-		index := i // Capture this for the closure below
-		injectedDefines[i] = valueToInject[key]
-		rawDefines[key] = config.DefineData{DefineFunc: func(args config.DefineArgs) js_ast.E {
-			return &js_ast.EIdentifier{Ref: args.SymbolForDefine(index)}
-		}}
+	var injectedDefines []config.InjectedDefine
+	if len(definesToInject) > 0 {
+		injectedDefines = make([]config.InjectedDefine, len(definesToInject))
+		sort.Strings(definesToInject)
+		for i, key := range definesToInject {
+			index := i // Capture this for the closure below
+			injectedDefines[i] = valueToInject[key]
+			rawDefines[key] = config.DefineData{DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.EIdentifier{Ref: args.SymbolForDefine(index)}
+			}}
+		}
+	}
+
+	// If we're bundling for the browser, add a special-cased define for
+	// "process.env.NODE_ENV" that is "development" when not minifying and
+	// "production" when minifying. This is a convention from the React world
+	// that must be handled to avoid all React code crashing instantly. This
+	// is only done if it's not already defined so that you can override it if
+	// necessary.
+	if platform == PlatformBrowser {
+		if _, process := rawDefines["process"]; !process {
+			if _, processEnv := rawDefines["process.env"]; !processEnv {
+				if _, processEnvNodeEnv := rawDefines["process.env.NODE_ENV"]; !processEnvNodeEnv {
+					var value []uint16
+					if minify {
+						value = js_lexer.StringToUTF16("production")
+					} else {
+						value = js_lexer.StringToUTF16("development")
+					}
+					rawDefines["process.env.NODE_ENV"] = config.DefineData{
+						DefineFunc: func(args config.DefineArgs) js_ast.E {
+							return &js_ast.EString{Value: value}
+						},
+					}
+				}
+			}
+		}
 	}
 
 	for _, key := range pureFns {
@@ -733,7 +764,8 @@ func rebuildImpl(
 	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
 	bannerJS, bannerCSS := validateBannerOrFooter(log, "banner", buildOpts.Banner)
 	footerJS, footerCSS := validateBannerOrFooter(log, "footer", buildOpts.Footer)
-	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure)
+	minify := buildOpts.MinifyWhitespace && buildOpts.MinifyIdentifiers && buildOpts.MinifySyntax
+	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure, buildOpts.Platform, minify)
 	options := config.Options{
 		UnsupportedJSFeatures:  jsFeatures,
 		UnsupportedCSSFeatures: cssFeatures,
@@ -792,7 +824,13 @@ func rebuildImpl(
 	for i, path := range buildOpts.NodePaths {
 		options.AbsNodePaths[i] = validatePath(log, realFS, path, "node path")
 	}
-	entryPoints := append([]string{}, buildOpts.EntryPoints...)
+	entryPoints := make([]bundler.EntryPoint, 0, len(buildOpts.EntryPoints)+len(buildOpts.EntryPointsAdvanced))
+	for _, ep := range buildOpts.EntryPoints {
+		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep})
+	}
+	for _, ep := range buildOpts.EntryPointsAdvanced {
+		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep.InputPath, OutputPath: ep.OutputPath})
+	}
 	entryPointCount := len(entryPoints)
 	if buildOpts.Stdin != nil {
 		entryPointCount++
@@ -900,7 +938,7 @@ func rebuildImpl(
 						waitGroup := sync.WaitGroup{}
 						waitGroup.Add(len(results))
 						for _, result := range results {
-							go func(result bundler.OutputFile) {
+							go func(result graph.OutputFile) {
 								fs.BeforeFileOpen()
 								defer fs.AfterFileClose()
 								if err := os.MkdirAll(realFS.Dir(result.AbsPath), 0755); err != nil {
@@ -1034,11 +1072,13 @@ func (w *watcher) start(logLevel LogLevel, color StderrColor, mode WatchMode) {
 	useColor := validateColor(color)
 
 	go func() {
+		shouldLog := logLevel == LogLevelInfo || logLevel == LogLevelDebug
+
 		// Note: Do not change these log messages without a breaking version change.
 		// People want to run regexes over esbuild's stderr stream to look for these
 		// messages instead of using esbuild's API.
 
-		if logLevel == LogLevelInfo {
+		if shouldLog {
 			logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
 				return fmt.Sprintf("%s[watch] build finished, watching for changes...%s\n", colors.Dim, colors.Reset)
 			})
@@ -1050,7 +1090,7 @@ func (w *watcher) start(logLevel LogLevel, color StderrColor, mode WatchMode) {
 
 			// Rebuild if we're dirty
 			if absPath := w.tryToFindDirtyPath(); absPath != "" {
-				if logLevel == LogLevelInfo {
+				if shouldLog {
 					logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
 						prettyPath := w.resolver.PrettyPath(logger.Path{Text: absPath, Namespace: "file"})
 						return fmt.Sprintf("%s[watch] build started (change: %q)%s\n", colors.Dim, prettyPath, colors.Reset)
@@ -1060,7 +1100,7 @@ func (w *watcher) start(logLevel LogLevel, color StderrColor, mode WatchMode) {
 				// Run the build
 				w.setWatchData(w.rebuild())
 
-				if logLevel == LogLevelInfo {
+				if shouldLog {
 					logger.PrintTextWithColor(os.Stderr, useColor, func(colors logger.Colors) string {
 						return fmt.Sprintf("%s[watch] build finished%s\n", colors.Dim, colors.Reset)
 					})
@@ -1146,7 +1186,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 
 	// Settings from the user come first
 	preserveUnusedImportsTS := false
-	useDefineForClassFieldsTS := false
+	useDefineForClassFieldsTS := config.Unspecified
 	jsx := config.JSXOptions{
 		Factory:  validateJSX(log, transformOpts.JSXFactory, "factory"),
 		Fragment: validateJSX(log, transformOpts.JSXFragment, "fragment"),
@@ -1167,8 +1207,8 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 			if len(result.JSXFragmentFactory) > 0 {
 				jsx.Fragment = result.JSXFragmentFactory
 			}
-			if result.UseDefineForClassFields {
-				useDefineForClassFieldsTS = true
+			if result.UseDefineForClassFields != config.Unspecified {
+				useDefineForClassFieldsTS = result.UseDefineForClassFields
 			}
 			if result.PreserveImportsNotUsedAsValues {
 				preserveUnusedImportsTS = true
@@ -1186,7 +1226,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 
 	// Convert and validate the transformOpts
 	jsFeatures, cssFeatures, targetEnv := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
-	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure)
+	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure, PlatformNeutral, false /* minify */)
 	options := config.Options{
 		UnsupportedJSFeatures:   jsFeatures,
 		UnsupportedCSSFeatures:  cssFeatures,
@@ -1235,7 +1275,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		options.Mode = config.ModeConvertFormat
 	}
 
-	var results []bundler.OutputFile
+	var results []graph.OutputFile
 
 	// Stop now if there were errors
 	if !log.HasErrors() {

@@ -223,6 +223,7 @@ type Lexer struct {
 	end                             int
 	ApproximateNewlineCount         int
 	LegacyOctalLoc                  logger.Loc
+	PreviousBackslashQuoteInJSX     logger.Range
 	Token                           T
 	HasNewlineBefore                bool
 	HasPureCommentBefore            bool
@@ -564,6 +565,7 @@ func IsIdentifierUTF16(text []uint16) bool {
 		return false
 	}
 	for i := 0; i < n; i++ {
+		isStart := i == 0
 		r1 := rune(text[i])
 		if r1 >= 0xD800 && r1 <= 0xDBFF && i+1 < n {
 			if r2 := rune(text[i+1]); r2 >= 0xDC00 && r2 <= 0xDFFF {
@@ -571,7 +573,7 @@ func IsIdentifierUTF16(text []uint16) bool {
 				i++
 			}
 		}
-		if i == 0 {
+		if isStart {
 			if !IsIdentifierStart(r1) {
 				return false
 			}
@@ -890,6 +892,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 			}
 
 		case '\'', '"':
+			var backslash logger.Range
 			quote := lexer.codePoint
 			needsDecode := false
 			lexer.step()
@@ -904,7 +907,16 @@ func (lexer *Lexer) NextInsideJSXElement() {
 					needsDecode = true
 					lexer.step()
 
+				case '\\':
+					backslash = logger.Range{Loc: logger.Loc{Start: int32(lexer.end)}, Len: 1}
+					lexer.step()
+					continue
+
 				case quote:
+					if backslash.Len > 0 {
+						backslash.Len++
+						lexer.PreviousBackslashQuoteInJSX = backslash
+					}
 					lexer.step()
 					break stringLiteral
 
@@ -915,6 +927,7 @@ func (lexer *Lexer) NextInsideJSXElement() {
 					}
 					lexer.step()
 				}
+				backslash = logger.Range{}
 			}
 
 			lexer.Token = TStringLiteral
@@ -1254,7 +1267,6 @@ func (lexer *Lexer) Next() {
 			case '=':
 				lexer.step()
 				lexer.Token = TSlashEquals
-				break
 
 			case '/':
 			singleLineComment:

@@ -94,7 +94,11 @@ func (s *suite) expectBundled(t *testing.T, args bundled) {
 		log := logger.NewDeferLog()
 		caches := cache.MakeCacheSet()
 		resolver := resolver.NewResolver(fs, log, caches, args.options)
-		bundle := ScanBundle(log, fs, resolver, caches, args.entryPaths, args.options)
+		entryPoints := make([]EntryPoint, 0, len(args.entryPaths))
+		for _, path := range args.entryPaths {
+			entryPoints = append(entryPoints, EntryPoint{InputPath: path})
+		}
+		bundle := ScanBundle(log, fs, resolver, caches, entryPoints, args.options)
 		msgs := log.Done()
 		assertLog(t, msgs, args.expectedScanLog)
 
@@ -174,7 +178,12 @@ func (s *suite) compareSnapshot(t *testing.T, testName string, generated string)
 		if expected, ok := s.expectedSnapshots[testName]; ok {
 			assertEqual(t, generated, expected)
 		} else {
-			t.Fatalf("No snapshot saved for %s\n%s", testName, generated)
+			t.Fatalf("No snapshot saved for %s\n%s%s%s",
+				testName,
+				logger.TerminalColors.Green,
+				generated,
+				logger.TerminalColors.Reset,
+			)
 		}
 	}
 }

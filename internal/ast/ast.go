@@ -82,8 +82,8 @@ type ImportRecord struct {
 	ContainsDefaultAlias bool
 
 	// If true, this "export * from 'path'" statement is evaluated at run-time by
-	// calling the "__exportStar()" helper function
-	CallsRunTimeExportStarFn bool
+	// calling the "__reExport()" helper function
+	CallsRunTimeReExportFn bool
 
 	// Tell the printer to wrap this call to "require()" in "__toModule(...)"
 	WrapWithToModule bool

@@ -80,6 +80,156 @@
     }),
   )
 
+  // Test coverage for a special JSX error message
+  tests.push(
+    test(['example.jsx', '--outfile=node.js'], {
+      'example.jsx': `let button = <Button content="some so-called \\"button text\\"" />`,
+    }, {
+      expectedStderr: ` > example.jsx:1:58: error: Unexpected backslash in JSX element
+    1 │ let button = <Button content="some so-called \\"button text\\"" />
+      ╵                                                           ^
+   example.jsx:1:45: note: Quoted JSX attributes use XML-style escapes instead of JavaScript-style escapes
+    1 │ let button = <Button content="some so-called \\"button text\\"" />
+      │                                              ~~
+      ╵                                              &quot;
+   example.jsx:1:29: note: Consider using a JavaScript string inside {...} instead of a quoted JSX attribute
+    1 │ let button = <Button content="some so-called \\"button text\\"" />
+      │                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ╵                              {"some so-called \\"button text\\""}
+
+`,
+    }),
+    test(['example.jsx', '--outfile=node.js'], {
+      'example.jsx': `let button = <Button content='some so-called \\'button text\\'' />`,
+    }, {
+      expectedStderr: ` > example.jsx:1:58: error: Unexpected backslash in JSX element
+    1 │ let button = <Button content='some so-called \\'button text\\'' />
+      ╵                                                           ^
+   example.jsx:1:45: note: Quoted JSX attributes use XML-style escapes instead of JavaScript-style escapes
+    1 │ let button = <Button content='some so-called \\'button text\\'' />
+      │                                              ~~
+      ╵                                              &apos;
+   example.jsx:1:29: note: Consider using a JavaScript string inside {...} instead of a quoted JSX attribute
+    1 │ let button = <Button content='some so-called \\'button text\\'' />
+      │                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ╵                              {'some so-called \\'button text\\''}
+
+`,
+    }),
+  )
+
+  // Test the "browser" field in "package.json"
+  tests.push(
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('foo')`,
+      'package.json': `{ "browser": { "./foo": "./file" } }`,
+      'file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('foo')`,
+      'package.json': `{ "browser": { "foo": "./file" } }`,
+      'file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('./foo')`,
+      'package.json': `{ "browser": { "./foo": "./file" } }`,
+      'file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('./foo')`,
+      'package.json': `{ "browser": { "foo": "./file" } }`,
+      'file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg/foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./foo/bar": "./file" } }`,
+      'node_modules/pkg/foo/bar.js': `invalid syntax`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg/foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "foo/bar": "./file" } }`,
+      'node_modules/pkg/foo/bar.js': `invalid syntax`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg/foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./foo/bar": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg/foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "foo/bar": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/index.js': `require('foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./foo/bar": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/index.js': `require('foo/bar')`,
+      'node_modules/pkg/package.json': `{ "browser": { "foo/bar": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/index.js': `throw 'fail'`,
+      'node_modules/pkg/package.json': `{ "browser": { "./index.js": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./index.js": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/index.js': `throw 'fail'`,
+      'node_modules/pkg/package.json': `{ "browser": { "./index": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./index": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/main.js': `throw 'fail'`,
+      'node_modules/pkg/package.json': `{ "main": "./main",\n  "browser": { "./main.js": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'node_modules/pkg/package.json': `{ "main": "./main",\n  "browser": { "./main.js": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'package.json': `{ "browser": { "pkg2": "pkg3" } }`,
+      'node_modules/pkg/index.js': `require('pkg2')`,
+      'node_modules/pkg/package.json': `{ "browser": { "pkg2": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'package.json': `{ "browser": { "pkg2": "pkg3" } }`,
+      'node_modules/pkg/index.js': `require('pkg2')`,
+      'node_modules/pkg2/index.js': `throw 'fail'`,
+      'node_modules/pkg3/index.js': `var works = true`,
+    }),
+    test(['entry.js', '--bundle', '--outfile=node.js'], {
+      'entry.js': `require('pkg')`,
+      'package.json': `{ "browser": { "pkg2": "pkg3" } }`,
+      'node_modules/pkg/index.js': `require('pkg2')`,
+      'node_modules/pkg/package.json': `{ "browser": { "./pkg2": "./file" } }`,
+      'node_modules/pkg/file.js': `var works = true`,
+    }),
+  )
+
   // Tests for symlinks
   //
   // Note: These are disabled on Windows because they fail when run with GitHub
@@ -182,6 +332,13 @@
       }),
     )
   }
+
+  // Test custom output paths
+  tests.push(
+    test(['node=entry.js', '--outdir=.'], {
+      'entry.js': ``,
+    }),
+  )
 
   // Make sure that the "asm.js" directive is removed
   tests.push(
@@ -362,6 +519,21 @@
       'foo.js': `let fn = (m, x) => m.exports = x; fn(module, 123)`,
       'node.js': `if (require('./out').default !== 123) throw 'fail'`,
     }),
+
+    // Deferred require shouldn't affect import
+    test(['--bundle', 'in.js', '--outfile=node.js', '--format=cjs'], {
+      'in.js': `
+        import { foo } from './a'
+        import './b'
+        if (foo !== 123) throw 'fail'
+      `,
+      'a.js': `
+        export let foo = 123
+      `,
+      'b.js': `
+        setTimeout(() => require('./a'), 0)
+      `,
+    }),
   )
 
   // Test internal CommonJS export
@@ -375,11 +547,11 @@
       'foo.js': `module.exports = 123`,
     }),
     test(['--bundle', 'in.js', '--outfile=node.js'], {
-      'in.js': `const out = require('./foo'); if (!out.__esModule || out.foo !== 123) throw 'fail'`,
+      'in.js': `const out = require('./foo'); if (out.__esModule || out.foo !== 123) throw 'fail'`,
       'foo.js': `export const foo = 123`,
     }),
     test(['--bundle', 'in.js', '--outfile=node.js'], {
-      'in.js': `const out = require('./foo'); if (!out.__esModule || out.default !== 123) throw 'fail'`,
+      'in.js': `const out = require('./foo'); if (out.__esModule || out.default !== 123) throw 'fail'`,
       'foo.js': `export default 123`,
     }),
 
@@ -390,11 +562,17 @@
     test(['--bundle', 'in.js', '--outfile=node.js'], {
       'in.js': `module.exports = 123; const out = require('./in'); if (out.__esModule || out !== 123) throw 'fail'`,
     }),
-    test(['--bundle', 'in.js', '--outfile=node.js'], {
+    test(['--bundle', 'in.js', '--outfile=node.js', '--format=cjs'], {
       'in.js': `export const foo = 123; const out = require('./in'); if (!out.__esModule || out.foo !== 123) throw 'fail'`,
     }),
-    test(['--bundle', 'in.js', '--outfile=node.js'], {
+    test(['--bundle', 'in.js', '--outfile=node.js', '--format=cjs'], {
       'in.js': `export default 123; const out = require('./in'); if (!out.__esModule || out.default !== 123) throw 'fail'`,
+    }),
+    test(['--bundle', 'in.js', '--outfile=node.js', '--format=esm'], {
+      'in.js': `export const foo = 123; const out = require('./in'); if (out.__esModule || out.foo !== 123) throw 'fail'`,
+    }),
+    test(['--bundle', 'in.js', '--outfile=node.js', '--format=esm'], {
+      'in.js': `export default 123; const out = require('./in'); if (out.__esModule || out.default !== 123) throw 'fail'`,
     }),
 
     // Test bundled and non-bundled double export star
@@ -419,7 +597,7 @@
         import {a, b} from './re-export'
         if (a !== 'a' || b !== 'b') throw 'fail'
 
-        // Try forcing all of these modules to be CommonJS wrappers
+        // Try forcing all of these modules to be wrappers
         require('./node')
         require('./re-export')
         require('./a')
@@ -434,6 +612,36 @@
       `,
       'b.ts': `
         export let b = 'b'
+      `,
+    }),
+    test(['node.ts', '--bundle', '--format=cjs', '--outdir=.'], {
+      'node.ts': `
+        import {a, b, c, d} from './re-export'
+        if (a !== 'a' || b !== 'b' || c !== 'c' || d !== 'd') throw 'fail'
+
+        // Try forcing all of these modules to be wrappers
+        require('./node')
+        require('./re-export')
+        require('./a')
+        require('./b')
+      `,
+      're-export.ts': `
+        export * from './a'
+        export * from './b'
+        export * from './d'
+      `,
+      'a.ts': `
+        export let a = 'a'
+      `,
+      'b.ts': `
+        exports.b = 'b'
+      `,
+      'c.ts': `
+        exports.c = 'c'
+      `,
+      'd.ts': `
+        export * from './c'
+        export let d = 'd'
       `,
     }),
     test(['node.ts', 're-export.ts', 'a.ts', 'b.ts', '--format=cjs', '--outdir=.'], {
@@ -505,7 +713,7 @@
         let fn = a()
         if (fn === a || fn() !== a) throw 'fail'
 
-        // Try forcing all of these modules to be CommonJS wrappers
+        // Try forcing all of these modules to be wrappers
         require('./node')
         require('./re-export')
         require('./a')
@@ -629,6 +837,30 @@
         }),
       )
     }
+
+    tests.push(
+      // Make sure entry points where a dependency has top-level await are awaited
+      test(['--bundle', 'in.js', '--outfile=out.js', '--format=esm'].concat(minify), {
+        'in.js': `import './foo'; import('./in.js'); throw 'fail'`,
+        'foo.js': `throw await 'stop'`,
+        'node.js': `export let async = async () => { try { await import('./out.js') } catch (e) { if (e === 'stop') return } throw 'fail' }`,
+      }, { async: true }),
+
+      // Self export
+      test(['--bundle', 'in.js', '--outfile=node.js', '--format=esm'].concat(minify), {
+        'in.js': `export default 123; export let async = async () => { const out = await import('./in'); if (out.default !== 123) throw 'fail' }`,
+      }, { async: true }),
+      test(['--bundle', 'in.js', '--outfile=node.js', '--format=esm'].concat(minify), {
+        'in.js': `export default 123; import * as out from './in'; export let async = async () => { await import('./in'); if (out.default !== 123) throw 'fail' }`,
+      }, { async: true }),
+
+      // Inject
+      test(['--bundle', 'node.ts', 'node2.ts', '--outdir=.', '--format=esm', '--inject:foo.js', '--splitting'].concat(minify), {
+        'node.ts': `if (foo.bar !== 123) throw 'fail'`,
+        'node2.ts': `throw [foo.bar, require('./node2.ts')] // Force this file to be lazily initialized so foo.js is lazily initialized`,
+        'foo.js': `export let foo = {bar: 123}`,
+      }),
+    )
   }
 
   // Check that duplicate top-level exports don't collide in the presence of "eval"
@@ -636,8 +868,7 @@
     test(['--bundle', '--format=esm', 'in.js', '--outfile=node.js'], {
       'in.js': `
         import a from './a'
-        import b from './b'
-        if (a !== 'runner1.js' || b !== 'runner2.js') throw 'fail'
+        if (a !== 'runner1.js') throw 'fail'
       `,
       'a.js': `
         import { run } from './runner1'
@@ -646,6 +877,10 @@
       'runner1.js': `
         let data = eval('"runner1" + ".js"')
         export function run() { return data }
+
+        // Do this here instead of in "in.js" so that log order is deterministic
+        import b from './b'
+        if (b !== 'runner2.js') throw 'fail'
       `,
       'b.js': `
         import { run } from './runner2'
@@ -656,12 +891,12 @@
         export function run() { return data }
       `,
     }, {
-      expectedStderr: ` > runner2.js:2:19: warning: Using direct eval with a bundler is not recommended and may cause problems (more info: https://esbuild.github.io/link/direct-eval)
-    2 │         let data = eval('"runner2" + ".js"')
+      expectedStderr: ` > runner1.js:2:19: warning: Using direct eval with a bundler is not recommended and may cause problems (more info: https://esbuild.github.io/link/direct-eval)
+    2 │         let data = eval('"runner1" + ".js"')
       ╵                    ~~~~
 
- > runner1.js:2:19: warning: Using direct eval with a bundler is not recommended and may cause problems (more info: https://esbuild.github.io/link/direct-eval)
-    2 │         let data = eval('"runner1" + ".js"')
+ > runner2.js:2:19: warning: Using direct eval with a bundler is not recommended and may cause problems (more info: https://esbuild.github.io/link/direct-eval)
+    2 │         let data = eval('"runner2" + ".js"')
       ╵                    ~~~~
 
 `,
@@ -1316,6 +1551,145 @@
       `,
     }),
   )
+
+  // This shouldn't cause a syntax error
+  // https://github.com/evanw/esbuild/issues/1082
+  tests.push(
+    test(['in.js', '--outfile=node.js', '--minify', '--bundle'], {
+      'in.js': `
+        return import('./in.js')
+      `,
+    }),
+  )
+
+  // This shouldn't crash
+  // https://github.com/evanw/esbuild/issues/1080
+  tests.push(
+    // Various CommonJS cases
+    test(['in.js', '--outfile=node.js', '--bundle', '--log-level=error'], {
+      'in.js': `import "pkg"; return`,
+      'node_modules/pkg/package.json': `{ "sideEffects": false }`,
+      'node_modules/pkg/index.js': `module.exports = null; throw 'fail'`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo={"x":0}', '--bundle'], {
+      'in.js': `if (foo.x !== 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo.bar={"x":0}', '--bundle'], {
+      'in.js': `if (foo.bar.x !== 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module={"x":0}', '--bundle'], {
+      'in.js': `if (module.x !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module.foo={"x":0}', '--bundle'], {
+      'in.js': `if (module.foo !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports={"x":0}', '--bundle'], {
+      'in.js': `if (exports.x !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports.foo={"x":0}', '--bundle'], {
+      'in.js': `if (exports.foo !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo=["x"]', '--bundle'], {
+      'in.js': `if (foo[0] !== 'x') throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo.bar=["x"]', '--bundle'], {
+      'in.js': `if (foo.bar[0] !== 'x') throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module=["x"]', '--bundle'], {
+      'in.js': `if (module[0] !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module.foo=["x"]', '--bundle'], {
+      'in.js': `if (module.foo !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports=["x"]', '--bundle'], {
+      'in.js': `if (exports[0] !== void 0) throw 'fail'; return`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports.foo=["x"]', '--bundle'], {
+      'in.js': `if (exports.foo !== void 0) throw 'fail'; return`,
+    }),
+
+    // Various ESM cases
+    test(['in.js', '--outfile=node.js', '--bundle', '--log-level=error'], {
+      'in.js': `import "pkg"`,
+      'node_modules/pkg/package.json': `{ "sideEffects": false }`,
+      'node_modules/pkg/index.js': `module.exports = null; throw 'fail'`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo={"x":0}', '--bundle'], {
+      'in.js': `if (foo.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo.bar={"x":0}', '--bundle'], {
+      'in.js': `if (foo.bar.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module={"x":0}', '--bundle'], {
+      'in.js': `if (module.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module.foo={"x":0}', '--bundle'], {
+      'in.js': `if (module.foo.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports={"x":0}', '--bundle'], {
+      'in.js': `if (exports.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports.foo={"x":0}', '--bundle'], {
+      'in.js': `if (exports.foo.x !== 0) throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo=["x"]', '--bundle'], {
+      'in.js': `if (foo[0] !== 'x') throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:foo.bar=["x"]', '--bundle'], {
+      'in.js': `if (foo.bar[0] !== 'x') throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module=["x"]', '--bundle'], {
+      'in.js': `if (module[0] !== 'x') throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:module.foo=["x"]', '--bundle'], {
+      'in.js': `if (module.foo[0] !== 'x') throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports=["x"]', '--bundle'], {
+      'in.js': `if (exports[0] !== 'x') throw 'fail'; export {}`,
+    }),
+    test(['in.js', '--outfile=node.js', '--define:exports.foo=["x"]', '--bundle'], {
+      'in.js': `if (exports.foo[0] !== 'x') throw 'fail'; export {}`,
+    }),
+  )
+
+  // Check for "sideEffects: false" wrapper handling
+  // https://github.com/evanw/esbuild/issues/1088
+  for (const pkgJSON of [`{}`, `{"sideEffects": false}`]) {
+    for (const entry of [
+      `export let async = async () => { if (require("pkg").foo() !== 123) throw 'fail' }`,
+      `export let async = () => import("pkg").then(x => { if (x.foo() !== 123) throw 'fail' })`,
+    ]) {
+      for (const index of [`export {foo} from "./foo.js"`, `import {foo} from "./foo.js"; export {foo}`]) {
+        for (const foo of [`export let foo = () => 123`, `exports.foo = () => 123`]) {
+          tests.push(test(['in.js', '--outfile=node.js', '--bundle'], {
+            'in.js': entry,
+            'node_modules/pkg/package.json': pkgJSON,
+            'node_modules/pkg/index.js': index,
+            'node_modules/pkg/foo.js': foo,
+          }, { async: true }))
+        }
+      }
+    }
+    for (const entry of [
+      `export let async = async () => { try { require("pkg") } catch (e) { return } throw 'fail' }`,
+      `export let async = () => import("pkg").then(x => { throw 'fail' }, () => {})`,
+    ]) {
+      tests.push(test(['in.js', '--outfile=node.js', '--bundle'], {
+        'in.js': entry,
+        'node_modules/pkg/package.json': pkgJSON,
+        'node_modules/pkg/index.js': `
+          export {foo} from './b.js'
+        `,
+        'node_modules/pkg/b.js': `
+          export {foo} from './c.js'
+          throw 'stop'
+        `,
+        'node_modules/pkg/c.js': `
+          export let foo = () => 123
+        `,
+      }, { async: true }))
+    }
+  }
 
   // Tests for "arguments" scope issues
   tests.push(
@@ -2973,6 +3347,20 @@
         if (JSON.stringify(obj) !== JSON.stringify(ns)) throw 'fail'
       `,
     }),
+
+    // Test the initializer being overwritten
+    test(['in.ts', '--outfile=node.js', '--target=es6'], {
+      'in.ts': `
+        var z = {x: {z: 'z'}, y: 'y'}, {x: z, ...y} = z
+        if (y.y !== 'y' || z.z !== 'z') throw 'fail'
+      `,
+    }),
+    test(['in.ts', '--outfile=node.js', '--target=es6'], {
+      'in.ts': `
+        var z = {x: {x: 'x'}, y: 'y'}, {[(z = {z: 'z'}, 'x')]: x, ...y} = z
+        if (x.x !== 'x' || y.y !== 'y' || z.z !== 'z') throw 'fail'
+      `,
+    }),
   )
 
   // Code splitting tests
@@ -3140,6 +3528,90 @@
         import {b} from './out/b.js'
         import {ca, cb} from './out/c.js'
         if (a === b || ca === cb || a !== ca || b !== cb) throw 'fail'
+      `,
+    }),
+
+    // "sideEffects": false
+    // https://github.com/evanw/esbuild/issues/1081
+    test(['entry.js', '--outdir=out', '--splitting', '--format=esm', '--bundle', '--chunk-names=[name]'], {
+      'entry.js': `import('./a'); import('./b')`,
+      'a.js': `import { bar } from './shared'; bar()`,
+      'b.js': `import './shared'`,
+      'shared.js': `import { foo } from './foo'; export let bar = foo`,
+      'foo/index.js': `export let foo = () => {}`,
+      'foo/package.json': `{ "sideEffects": false }`,
+      'node.js': `
+        import path from 'path'
+        import url from 'url'
+        const __dirname = path.dirname(url.fileURLToPath(import.meta.url))
+
+        // Read the output files
+        import fs from 'fs'
+        const a = fs.readFileSync(path.join(__dirname, 'out', 'a.js'), 'utf8')
+        const chunk = fs.readFileSync(path.join(__dirname, 'out', 'chunk.js'), 'utf8')
+
+        // Make sure the two output files don't import each other
+        import assert from 'assert'
+        assert.notStrictEqual(chunk.includes('a.js'), a.includes('chunk.js'), 'chunks must not import each other')
+      `,
+    }),
+    test(['entry.js', '--outdir=out', '--splitting', '--format=esm', '--bundle'], {
+      'entry.js': `await import('./a'); await import('./b')`,
+      'a.js': `import { bar } from './shared'; bar()`,
+      'b.js': `import './shared'`,
+      'shared.js': `import { foo } from './foo'; export let bar = foo`,
+      'foo/index.js': `export let foo = () => {}`,
+      'foo/package.json': `{ "sideEffects": false }`,
+      'node.js': `
+        // This must not crash
+        import './out/entry.js'
+      `,
+    }),
+
+    // Code splitting where only one entry point uses the runtime
+    // https://github.com/evanw/esbuild/issues/1123
+    test(['a.js', 'b.js', '--outdir=out', '--splitting', '--format=esm', '--bundle'], {
+      'a.js': `
+        import * as foo from './shared'
+        export default foo
+      `,
+      'b.js': `
+        import {bar} from './shared'
+        export default bar
+      `,
+      'shared.js': `
+        export function foo() {
+          return 'foo'
+        }
+        export function bar() {
+          return 'bar'
+        }
+      `,
+      'node.js': `
+        import a from './out/a.js'
+        import b from './out/b.js'
+        if (a.foo() !== 'foo') throw 'fail'
+        if (b() !== 'bar') throw 'fail'
+      `,
+    }),
+
+    // Code splitting with a dynamic import that imports a CSS file
+    // https://github.com/evanw/esbuild/issues/1125
+    test(['parent.js', '--outdir=out', '--splitting', '--format=esm', '--bundle'], {
+      'parent.js': `
+        // This should import the primary JS chunk, not the secondary CSS chunk
+        await import('./child')
+      `,
+      'child.js': `
+        import './foo.css'
+      `,
+      'foo.css': `
+        body {
+          color: black;
+        }
+      `,
+      'node.js': `
+        import './out/parent.js'
       `,
     }),
   )
@@ -3488,6 +3960,36 @@
     )
   }
 
+  // Top-level await tests
+  tests.push(
+    test(['in.js', '--outdir=out', '--format=esm', '--bundle'], {
+      'in.js': `
+        function foo() {
+          globalThis.tlaTrace.push(2)
+          return import('./a.js')
+        }
+
+        globalThis.tlaTrace = []
+        globalThis.tlaTrace.push(1)
+        const it = (await foo()).default
+        globalThis.tlaTrace.push(6)
+        if (it !== 123 || globalThis.tlaTrace.join(',') !== '1,2,3,4,5,6') throw 'fail'
+      `,
+      'a.js': `
+        globalThis.tlaTrace.push(5)
+        export { default } from './b.js'
+      `,
+      'b.js': `
+        globalThis.tlaTrace.push(3)
+        export default await Promise.resolve(123)
+        globalThis.tlaTrace.push(4)
+      `,
+      'node.js': `
+        import './out/in.js'
+      `,
+    }),
+  )
+
   // Test writing to stdout
   tests.push(
     // These should succeed
@@ -3635,7 +4137,8 @@
       // If the test doesn't specify a format, test both formats
       for (const format of formats) {
         const formatArg = `--format=${format}`
-        const modifiedArgs = (!hasBundle || args.includes(formatArg) ? args : args.concat(formatArg)).concat('--log-level=warning')
+        const logLevelArgs = args.some(arg => arg.startsWith('--log-level=')) ? [] : ['--log-level=warning']
+        const modifiedArgs = (!hasBundle || args.includes(formatArg) ? args : args.concat(formatArg)).concat(logLevelArgs)
         const thisTestDir = path.join(testDir, '' + testCount++)
 
         try {
@@ -3755,8 +4258,18 @@
   removeRecursiveSync(testDir)
   await fs.mkdir(testDir, { recursive: true })
 
-  // Run all tests concurrently
-  const allTestsPassed = (await Promise.all(tests.map(test => test()))).every(success => success)
+  // Run tests in batches so they work in CI, which has a limited memory ceiling
+  let allTestsPassed = true
+  let batch = 32
+  for (let i = 0; i < tests.length; i += batch) {
+    let promises = []
+    for (let test of tests.slice(i, i + batch)) {
+      let promise = test()
+      promise.catch(() => allTestsPassed = false)
+      promises.push(promise)
+    }
+    await Promise.all(promises)
+  }
 
   if (!allTestsPassed) {
     console.error(`❌ end-to-end tests failed`)

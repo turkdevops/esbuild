@@ -35,6 +35,9 @@ let mustBeArray = <T>(value: T[] | undefined): string | null =>
 let mustBeObject = (value: Object | undefined): string | null =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? null : 'an object';
 
+let mustBeArrayOrRecord = <T extends string>(value: T[] | Record<T, T> | undefined): string | null =>
+  typeof value === 'object' && value !== null ? null : 'an array or an object';
+
 let mustBeObjectOrNull = (value: Object | null | undefined): string | null =>
   typeof value === 'object' && !Array.isArray(value) ? null : 'an object or null';
 
@@ -146,6 +149,7 @@ function flagsForBuildOptions(
   logLevelDefault: types.LogLevel,
   writeDefault: boolean,
 ): {
+  entries: [string, string][],
   flags: string[],
   write: boolean,
   stdinContents: string | null,
@@ -156,6 +160,7 @@ function flagsForBuildOptions(
   watch: types.WatchMode | null,
 } {
   let flags: string[] = [];
+  let entries: [string, string][] = [];
   let keys: OptionKeys = Object.create(null);
   let stdinContents: string | null = null;
   let stdinResolveDir: string | null = null;
@@ -188,7 +193,7 @@ function flagsForBuildOptions(
   let inject = getFlag(options, keys, 'inject', mustBeArray);
   let banner = getFlag(options, keys, 'banner', mustBeObject);
   let footer = getFlag(options, keys, 'footer', mustBeObject);
-  let entryPoints = getFlag(options, keys, 'entryPoints', mustBeArray);
+  let entryPoints = getFlag(options, keys, 'entryPoints', mustBeArrayOrRecord);
   let absWorkingDir = getFlag(options, keys, 'absWorkingDir', mustBeString);
   let stdin = getFlag(options, keys, 'stdin', mustBeObject);
   let write = getFlag(options, keys, 'write', mustBeBoolean) ?? writeDefault; // Default to true if not specified
@@ -276,10 +281,14 @@ function flagsForBuildOptions(
   }
 
   if (entryPoints) {
-    for (let entryPoint of entryPoints) {
-      entryPoint += '';
-      if (entryPoint.startsWith('-')) throw new Error(`Invalid entry point: ${entryPoint}`);
-      flags.push(entryPoint);
+    if (Array.isArray(entryPoints)) {
+      for (let entryPoint of entryPoints) {
+        entries.push(['', entryPoint + '']);
+      }
+    } else {
+      for (let [key, value] of Object.entries(entryPoints)) {
+        entries.push([key + '', value + '']);
+      }
     }
   }
 
@@ -306,6 +315,7 @@ function flagsForBuildOptions(
   }
 
   return {
+    entries,
     flags,
     write,
     stdinContents,
@@ -370,7 +380,7 @@ export interface Refs {
 }
 
 export interface StreamService {
-  buildOrServe(
+  buildOrServe(args: {
     callName: string,
     refs: Refs | null,
     serveOptions: types.ServeOptions | null,
@@ -378,9 +388,9 @@ export interface StreamService {
     isTTY: boolean,
     defaultWD: string,
     callback: (err: Error | null, res: types.BuildResult | types.ServeResult | null) => void,
-  ): void;
+  }): void;
 
-  transform(
+  transform(args: {
     callName: string,
     refs: Refs | null,
     input: string,
@@ -388,15 +398,15 @@ export interface StreamService {
     isTTY: boolean,
     fs: StreamFS,
     callback: (err: Error | null, res: types.TransformResult | null) => void,
-  ): void;
+  }): void;
 
-  formatMessages(
+  formatMessages(args: {
     callName: string,
     refs: Refs | null,
     messages: types.PartialMessage[],
     options: types.FormatMessagesOptions,
     callback: (err: Error | null, res: string[] | null) => void,
-  ): void;
+  }): void;
 }
 
 // This can't use any promises in the main execution flow because it must work
@@ -588,9 +598,12 @@ export function createChannel(streamIn: StreamIn): StreamOut {
     }
   };
 
-  let handlePlugins = (initialOptions: types.BuildOptions, plugins: types.Plugin[], buildKey: number, stash: ObjectStash): [protocol.BuildPlugin[], Refs] => {
-    if (streamIn.isSync) throw new Error('Cannot use plugins in synchronous API calls');
-
+  let handlePlugins = async (
+    initialOptions: types.BuildOptions,
+    plugins: types.Plugin[],
+    buildKey: number,
+    stash: ObjectStash,
+  ): Promise<[protocol.BuildPlugin[], Refs]> => {
     let onResolveCallbacks: {
       [id: number]: {
         name: string,
@@ -631,7 +644,7 @@ export function createChannel(streamIn: StreamIn): StreamOut {
       };
       i++;
 
-      setup({
+      let promise = setup({
         initialOptions,
 
         onResolve(options, callback) {
@@ -660,6 +673,13 @@ export function createChannel(streamIn: StreamIn): StreamOut {
           plugin.onLoad.push({ id, filter: filter.source, namespace: namespace || '' });
         },
       });
+
+      // Await a returned promise if there was one. This allows plugins to do
+      // some asynchronous setup while still retaining the ability to modify
+      // the build options. This deliberately serializes asynchronous plugin
+      // setup instead of running them concurrently so that build option
+      // modifications are easier to reason about.
+      if (promise) await promise;
 
       requestPlugins.push(plugin);
     }
@@ -809,294 +829,352 @@ export function createChannel(streamIn: StreamIn): StreamOut {
     };
   };
 
+  const buildLogLevelDefault = 'warning';
+  const transformLogLevelDefault = 'silent';
+
+  let buildOrServe: StreamService['buildOrServe'] = args => {
+    let key = nextBuildKey++;
+    const details = createObjectStash();
+    let plugins: types.Plugin[] | undefined;
+    let { refs, options, isTTY, callback } = args;
+    if (typeof options === 'object') {
+      let value = options.plugins;
+      if (value !== void 0) {
+        if (!Array.isArray(value)) throw new Error(`"plugins" must be an array`);
+        plugins = value;
+      }
+    }
+    let handleError = (e: any) => {
+      let flags: string[] = [];
+      try { pushLogFlags(flags, options, {}, isTTY, buildLogLevelDefault) } catch { }
+      const error = extractErrorMessageV8(e, streamIn, details, void 0)
+      sendRequest(refs, { command: 'error', flags, error }, () => {
+        error.detail = details.load(error.detail);
+        callback(failureErrorWithLog('Build failed', [error], []), null);
+      });
+    };
+    if (plugins && plugins.length > 0) {
+      if (streamIn.isSync) return handleError(new Error('Cannot use plugins in synchronous API calls'));
+
+      // Plugins can use async/await because they can't be run with "buildSync"
+      handlePlugins(options, plugins, key, details).then(([requestPlugins, pluginRefs]) =>
+        buildOrServeContinue({
+          ...args,
+          key,
+          details,
+          requestPlugins,
+          pluginRefs,
+        })).catch(handleError);
+    } else {
+      try {
+        buildOrServeContinue({
+          ...args,
+          key,
+          details,
+          requestPlugins: null,
+          pluginRefs: null,
+        });
+      } catch (e) {
+        handleError(e);
+      }
+    }
+  }
+
+  // "buildOrServe" cannot be written using async/await due to "buildSync" and
+  // must be written in continuation-passing style instead. Sorry about all of
+  // the arguments, but these are passed explicitly instead of using another
+  // nested closure because this function is already huge and I didn't want to
+  // make it any bigger.
+  let buildOrServeContinue = ({
+    callName,
+    refs: callerRefs,
+    serveOptions,
+    options,
+    isTTY,
+    defaultWD,
+    callback,
+    key,
+    details,
+    requestPlugins,
+    pluginRefs,
+  }: {
+    callName: string,
+    refs: Refs | null,
+    serveOptions: types.ServeOptions | null,
+    options: types.BuildOptions,
+    isTTY: boolean,
+    defaultWD: string,
+    callback: (err: Error | null, res: types.BuildResult | types.ServeResult | null) => void,
+    key: number,
+    details: ObjectStash,
+    requestPlugins: protocol.BuildPlugin[] | null,
+    pluginRefs: Refs | null,
+  }) => {
+    const refs = {
+      ref() {
+        if (pluginRefs) pluginRefs.ref()
+        if (callerRefs) callerRefs.ref()
+      },
+      unref() {
+        if (pluginRefs) pluginRefs.unref()
+        if (callerRefs) callerRefs.unref()
+      },
+    }
+    let writeDefault = !streamIn.isBrowser;
+    let {
+      entries,
+      flags,
+      write,
+      stdinContents,
+      stdinResolveDir,
+      absWorkingDir,
+      incremental,
+      nodePaths,
+      watch,
+    } = flagsForBuildOptions(callName, options, isTTY, buildLogLevelDefault, writeDefault);
+    let request: protocol.BuildRequest = {
+      command: 'build',
+      key,
+      entries,
+      flags,
+      write,
+      stdinContents,
+      stdinResolveDir,
+      absWorkingDir: absWorkingDir || defaultWD,
+      incremental,
+      nodePaths,
+      hasOnRebuild: !!(watch && watch.onRebuild),
+    };
+    if (requestPlugins) request.plugins = requestPlugins;
+    let serve = serveOptions && buildServeData(refs, serveOptions, request);
+
+    // Factor out response handling so it can be reused for rebuilds
+    let rebuild: types.BuildResult['rebuild'] | undefined;
+    let stop: types.BuildResult['stop'] | undefined;
+    let copyResponseToResult = (response: protocol.BuildResponse, result: types.BuildResult) => {
+      if (response.outputFiles) result.outputFiles = response!.outputFiles.map(convertOutputFiles);
+      if (response.metafile) result.metafile = JSON.parse(response!.metafile);
+      if (response.writeToStdout !== void 0) console.log(protocol.decodeUTF8(response!.writeToStdout).replace(/\n$/, ''));
+    };
+    let buildResponseToResult = (
+      response: protocol.BuildResponse | null,
+      callback: (error: Error | null, result: types.BuildResult | null) => void,
+    ): void => {
+      let errors = replaceDetailsInMessages(response!.errors, details);
+      let warnings = replaceDetailsInMessages(response!.warnings, details);
+      if (errors.length > 0) return callback(failureErrorWithLog('Build failed', errors, warnings), null);
+      let result: types.BuildResult = { warnings };
+      copyResponseToResult(response!, result);
+
+      // Handle incremental rebuilds
+      if (response!.rebuildID !== void 0) {
+        if (!rebuild) {
+          let isDisposed = false;
+          (rebuild as any) = () => new Promise<types.BuildResult>((resolve, reject) => {
+            if (isDisposed || isClosed) throw new Error('Cannot rebuild');
+            sendRequest<protocol.RebuildRequest, protocol.BuildResponse>(refs, { command: 'rebuild', rebuildID: response!.rebuildID! },
+              (error2, response2) => {
+                if (error2) return callback(new Error(error2), null);
+                buildResponseToResult(response2, (error3, result3) => {
+                  if (error3) reject(error3);
+                  else resolve(result3!);
+                });
+              });
+          });
+          refs.ref()
+          rebuild!.dispose = () => {
+            if (isDisposed) return;
+            isDisposed = true;
+            sendRequest<protocol.RebuildDisposeRequest, null>(refs, { command: 'rebuild-dispose', rebuildID: response!.rebuildID! }, () => {
+              // We don't care about the result
+            });
+            refs.unref() // Do this after the callback so "sendRequest" can extend the lifetime
+          };
+        }
+        result.rebuild = rebuild;
+      }
+
+      // Handle watch mode
+      if (response!.watchID !== void 0) {
+        if (!stop) {
+          let isStopped = false;
+          refs.ref()
+          stop = () => {
+            if (isStopped) return;
+            isStopped = true;
+            watchCallbacks.delete(response!.watchID!);
+            sendRequest<protocol.WatchStopRequest, null>(refs, { command: 'watch-stop', watchID: response!.watchID! }, () => {
+              // We don't care about the result
+            });
+            refs.unref() // Do this after the callback so "sendRequest" can extend the lifetime
+          }
+          if (watch && watch.onRebuild) {
+            watchCallbacks.set(response!.watchID, (serviceStopError, watchResponse) => {
+              if (serviceStopError) return watch!.onRebuild!(serviceStopError as any, null);
+              let errors = replaceDetailsInMessages(watchResponse.errors, details);
+              let warnings = replaceDetailsInMessages(watchResponse.warnings, details);
+              if (errors.length > 0) return watch!.onRebuild!(failureErrorWithLog('Build failed', errors, warnings), null);
+              let result: types.BuildResult = { warnings };
+              copyResponseToResult(watchResponse, result);
+              if (watchResponse.rebuildID !== void 0) result.rebuild = rebuild;
+              result.stop = stop;
+              watch!.onRebuild!(null, result);
+            });
+          }
+        }
+        result.stop = stop;
+      }
+
+      return callback(null, result);
+    };
+
+    if (write && streamIn.isBrowser) throw new Error(`Cannot enable "write" in the browser`);
+    if (incremental && streamIn.isSync) throw new Error(`Cannot use "incremental" with a synchronous build`);
+    sendRequest<protocol.BuildRequest, protocol.BuildResponse>(refs, request, (error, response) => {
+      if (error) return callback(new Error(error), null);
+      if (serve) {
+        let serveResponse = response as any as protocol.ServeResponse;
+        let isStopped = false
+
+        // Add a ref/unref for "stop()"
+        refs.ref()
+        let result: types.ServeResult = {
+          port: serveResponse.port,
+          host: serveResponse.host,
+          wait: serve.wait,
+          stop() {
+            if (isStopped) return
+            isStopped = true
+            serve!.stop();
+            refs.unref() // Do this after the callback so "stop" can extend the lifetime
+          },
+        };
+
+        // Add a ref/unref for "wait". This must be done independently of
+        // "stop()" in case the response to "stop()" comes in first before
+        // the request for "wait". Without this ref/unref, node may close
+        // the child's stdin pipe after the "stop()" but before the "wait"
+        // which will cause things to break. This caused a test failure.
+        refs.ref()
+        serve.wait.then(refs.unref, refs.unref)
+
+        return callback(null, result);
+      }
+      return buildResponseToResult(response!, callback);
+    });
+  };
+
+  let transform: StreamService['transform'] = ({ callName, refs, input, options, isTTY, fs, callback }) => {
+    const details = createObjectStash();
+
+    // Ideally the "transform()" API would be faster than calling "build()"
+    // since it doesn't need to touch the file system. However, performance
+    // measurements with large files on macOS indicate that sending the data
+    // over the stdio pipe can be 2x slower than just using a temporary file.
+    //
+    // This appears to be an OS limitation. Both the JavaScript and Go code
+    // are using large buffers but the pipe only writes data in 8kb chunks.
+    // An investigation seems to indicate that this number is hard-coded into
+    // the OS source code. Presumably files are faster because the OS uses
+    // a larger chunk size, or maybe even reads everything in one syscall.
+    //
+    // The cross-over size where this starts to be faster is around 1mb on
+    // my machine. In that case, this code tries to use a temporary file if
+    // possible but falls back to sending the data over the stdio pipe if
+    // that doesn't work.
+    let start = (inputPath: string | null) => {
+      try {
+        if (typeof input !== 'string') throw new Error('The input to "transform" must be a string');
+        let flags = flagsForTransformOptions(callName, options, isTTY, transformLogLevelDefault);
+        let request: protocol.TransformRequest = {
+          command: 'transform',
+          flags,
+          inputFS: inputPath !== null,
+          input: inputPath !== null ? inputPath : input,
+        };
+        sendRequest<protocol.TransformRequest, protocol.TransformResponse>(refs, request, (error, response) => {
+          if (error) return callback(new Error(error), null);
+          let errors = replaceDetailsInMessages(response!.errors, details);
+          let warnings = replaceDetailsInMessages(response!.warnings, details);
+          let outstanding = 1;
+          let next = () => --outstanding === 0 && callback(null, { warnings, code: response!.code, map: response!.map });
+          if (errors.length > 0) return callback(failureErrorWithLog('Transform failed', errors, warnings), null);
+
+          // Read the JavaScript file from the file system
+          if (response!.codeFS) {
+            outstanding++;
+            fs.readFile(response!.code, (err, contents) => {
+              if (err !== null) {
+                callback(err, null);
+              } else {
+                response!.code = contents!;
+                next();
+              }
+            });
+          }
+
+          // Read the source map file from the file system
+          if (response!.mapFS) {
+            outstanding++;
+            fs.readFile(response!.map, (err, contents) => {
+              if (err !== null) {
+                callback(err, null);
+              } else {
+                response!.map = contents!;
+                next();
+              }
+            });
+          }
+
+          next();
+        });
+      } catch (e) {
+        let flags: string[] = [];
+        try { pushLogFlags(flags, options, {}, isTTY, transformLogLevelDefault) } catch { }
+        const error = extractErrorMessageV8(e, streamIn, details, void 0);
+        sendRequest(refs, { command: 'error', flags, error }, () => {
+          error.detail = details.load(error.detail);
+          callback(failureErrorWithLog('Transform failed', [error], []), null);
+        });
+      }
+    };
+    if (typeof input === 'string' && input.length > 1024 * 1024) {
+      let next = start;
+      start = () => fs.writeFile(input, next);
+    }
+    start(null);
+  };
+
+  let formatMessages: StreamService['formatMessages'] = ({ callName, refs, messages, options, callback }) => {
+    let result = sanitizeMessages(messages, 'messages', null);
+    if (!options) throw new Error(`Missing second argument in ${callName}() call`);
+    let keys: OptionKeys = {};
+    let kind = getFlag(options, keys, 'kind', mustBeString);
+    let color = getFlag(options, keys, 'color', mustBeBoolean);
+    let terminalWidth = getFlag(options, keys, 'terminalWidth', mustBeInteger);
+    checkForInvalidFlags(options, keys, `in ${callName}() call`);
+    if (kind === void 0) throw new Error(`Missing "kind" in ${callName}() call`);
+    if (kind !== 'error' && kind !== 'warning') throw new Error(`Expected "kind" to be "error" or "warning" in ${callName}() call`);
+    let request: protocol.FormatMsgsRequest = {
+      command: 'format-msgs',
+      messages: result,
+      isWarning: kind === 'warning',
+    }
+    if (color !== void 0) request.color = color;
+    if (terminalWidth !== void 0) request.terminalWidth = terminalWidth;
+    sendRequest<protocol.FormatMsgsRequest, protocol.FormatMsgsResponse>(refs, request, (error, response) => {
+      if (error) return callback(new Error(error), null);
+      callback(null, response!.messages);
+    });
+  };
+
   return {
     readFromStdout,
     afterClose,
-
     service: {
-      buildOrServe(callName, callerRefs, serveOptions, options, isTTY, defaultWD, callback) {
-        let pluginRefs: Refs | undefined;
-        const details = createObjectStash();
-        const logLevelDefault = 'warning';
-        const refs = {
-          ref() {
-            if (pluginRefs) pluginRefs.ref()
-            if (callerRefs) callerRefs.ref()
-          },
-          unref() {
-            if (pluginRefs) pluginRefs.unref()
-            if (callerRefs) callerRefs.unref()
-          },
-        }
-        try {
-          let key = nextBuildKey++;
-          let writeDefault = !streamIn.isBrowser;
-          let plugins: types.Plugin[] | undefined;
-          let requestPlugins: protocol.BuildPlugin[] | undefined;
-          if (typeof options === 'object') {
-            let value = options.plugins;
-            if (value !== void 0) {
-              if (!Array.isArray(value)) throw new Error(`"plugins" must be an array`);
-              plugins = value;
-            }
-          }
-          if (plugins && plugins.length > 0) {
-            [requestPlugins, pluginRefs] = handlePlugins(options, plugins, key, details);
-          }
-          let {
-            flags,
-            write,
-            stdinContents,
-            stdinResolveDir,
-            absWorkingDir,
-            incremental,
-            nodePaths,
-            watch,
-          } = flagsForBuildOptions(callName, options, isTTY, logLevelDefault, writeDefault);
-          let request: protocol.BuildRequest = {
-            command: 'build',
-            key,
-            flags,
-            write,
-            stdinContents,
-            stdinResolveDir,
-            absWorkingDir: absWorkingDir || defaultWD,
-            incremental,
-            nodePaths,
-            hasOnRebuild: !!(watch && watch.onRebuild),
-          };
-          if (requestPlugins) request.plugins = requestPlugins;
-          let serve = serveOptions && buildServeData(refs, serveOptions, request);
-
-          // Factor out response handling so it can be reused for rebuilds
-          let rebuild: types.BuildResult['rebuild'] | undefined;
-          let stop: types.BuildResult['stop'] | undefined;
-          let copyResponseToResult = (response: protocol.BuildResponse, result: types.BuildResult) => {
-            if (response.outputFiles) result.outputFiles = response!.outputFiles.map(convertOutputFiles);
-            if (response.metafile) result.metafile = JSON.parse(response!.metafile);
-            if (response.writeToStdout !== void 0) console.log(protocol.decodeUTF8(response!.writeToStdout).replace(/\n$/, ''));
-          };
-          let buildResponseToResult = (
-            response: protocol.BuildResponse | null,
-            callback: (error: Error | null, result: types.BuildResult | null) => void,
-          ): void => {
-            let errors = replaceDetailsInMessages(response!.errors, details);
-            let warnings = replaceDetailsInMessages(response!.warnings, details);
-            if (errors.length > 0) return callback(failureErrorWithLog('Build failed', errors, warnings), null);
-            let result: types.BuildResult = { warnings };
-            copyResponseToResult(response!, result);
-
-            // Handle incremental rebuilds
-            if (response!.rebuildID !== void 0) {
-              if (!rebuild) {
-                let isDisposed = false;
-                (rebuild as any) = () => new Promise<types.BuildResult>((resolve, reject) => {
-                  if (isDisposed || isClosed) throw new Error('Cannot rebuild');
-                  sendRequest<protocol.RebuildRequest, protocol.BuildResponse>(refs, { command: 'rebuild', rebuildID: response!.rebuildID! },
-                    (error2, response2) => {
-                      if (error2) return callback(new Error(error2), null);
-                      buildResponseToResult(response2, (error3, result3) => {
-                        if (error3) reject(error3);
-                        else resolve(result3!);
-                      });
-                    });
-                });
-                refs.ref()
-                rebuild!.dispose = () => {
-                  if (isDisposed) return;
-                  isDisposed = true;
-                  sendRequest<protocol.RebuildDisposeRequest, null>(refs, { command: 'rebuild-dispose', rebuildID: response!.rebuildID! }, () => {
-                    // We don't care about the result
-                  });
-                  refs.unref() // Do this after the callback so "sendRequest" can extend the lifetime
-                };
-              }
-              result.rebuild = rebuild;
-            }
-
-            // Handle watch mode
-            if (response!.watchID !== void 0) {
-              if (!stop) {
-                let isStopped = false;
-                refs.ref()
-                stop = () => {
-                  if (isStopped) return;
-                  isStopped = true;
-                  watchCallbacks.delete(response!.watchID!);
-                  sendRequest<protocol.WatchStopRequest, null>(refs, { command: 'watch-stop', watchID: response!.watchID! }, () => {
-                    // We don't care about the result
-                  });
-                  refs.unref() // Do this after the callback so "sendRequest" can extend the lifetime
-                }
-                if (watch && watch.onRebuild) {
-                  watchCallbacks.set(response!.watchID, (serviceStopError, watchResponse) => {
-                    if (serviceStopError) return watch!.onRebuild!(serviceStopError as any, null);
-                    let errors = replaceDetailsInMessages(watchResponse.errors, details);
-                    let warnings = replaceDetailsInMessages(watchResponse.warnings, details);
-                    if (errors.length > 0) return watch!.onRebuild!(failureErrorWithLog('Build failed', errors, warnings), null);
-                    let result: types.BuildResult = { warnings };
-                    copyResponseToResult(watchResponse, result);
-                    if (watchResponse.rebuildID !== void 0) result.rebuild = rebuild;
-                    result.stop = stop;
-                    watch!.onRebuild!(null, result);
-                  });
-                }
-              }
-              result.stop = stop;
-            }
-
-            return callback(null, result);
-          };
-
-          if (write && streamIn.isBrowser) throw new Error(`Cannot enable "write" in the browser`);
-          if (incremental && streamIn.isSync) throw new Error(`Cannot use "incremental" with a synchronous build`);
-          sendRequest<protocol.BuildRequest, protocol.BuildResponse>(refs, request, (error, response) => {
-            if (error) return callback(new Error(error), null);
-            if (serve) {
-              let serveResponse = response as any as protocol.ServeResponse;
-              let isStopped = false
-
-              // Add a ref/unref for "stop()"
-              refs.ref()
-              let result: types.ServeResult = {
-                port: serveResponse.port,
-                host: serveResponse.host,
-                wait: serve.wait,
-                stop() {
-                  if (isStopped) return
-                  isStopped = true
-                  serve!.stop();
-                  refs.unref() // Do this after the callback so "stop" can extend the lifetime
-                },
-              };
-
-              // Add a ref/unref for "wait". This must be done independently of
-              // "stop()" in case the response to "stop()" comes in first before
-              // the request for "wait". Without this ref/unref, node may close
-              // the child's stdin pipe after the "stop()" but before the "wait"
-              // which will cause things to break. This caused a test failure.
-              refs.ref()
-              serve.wait.then(refs.unref, refs.unref)
-
-              return callback(null, result);
-            }
-            return buildResponseToResult(response!, callback);
-          });
-        } catch (e) {
-          let flags: string[] = [];
-          try { pushLogFlags(flags, options, {}, isTTY, logLevelDefault) } catch { }
-          const error = extractErrorMessageV8(e, streamIn, details, void 0)
-          sendRequest(refs, { command: 'error', flags, error }, () => {
-            error.detail = details.load(error.detail);
-            callback(failureErrorWithLog('Build failed', [error], []), null);
-          });
-        }
-      },
-
-      transform(callName, refs, input, options, isTTY, fs, callback) {
-        const details = createObjectStash();
-        const logLevelDefault = 'silent';
-
-        // Ideally the "transform()" API would be faster than calling "build()"
-        // since it doesn't need to touch the file system. However, performance
-        // measurements with large files on macOS indicate that sending the data
-        // over the stdio pipe can be 2x slower than just using a temporary file.
-        //
-        // This appears to be an OS limitation. Both the JavaScript and Go code
-        // are using large buffers but the pipe only writes data in 8kb chunks.
-        // An investigation seems to indicate that this number is hard-coded into
-        // the OS source code. Presumably files are faster because the OS uses
-        // a larger chunk size, or maybe even reads everything in one syscall.
-        //
-        // The cross-over size where this starts to be faster is around 1mb on
-        // my machine. In that case, this code tries to use a temporary file if
-        // possible but falls back to sending the data over the stdio pipe if
-        // that doesn't work.
-        let start = (inputPath: string | null) => {
-          try {
-            if (typeof input !== 'string') throw new Error('The input to "transform" must be a string');
-            let flags = flagsForTransformOptions(callName, options, isTTY, logLevelDefault);
-            let request: protocol.TransformRequest = {
-              command: 'transform',
-              flags,
-              inputFS: inputPath !== null,
-              input: inputPath !== null ? inputPath : input,
-            };
-            sendRequest<protocol.TransformRequest, protocol.TransformResponse>(refs, request, (error, response) => {
-              if (error) return callback(new Error(error), null);
-              let errors = replaceDetailsInMessages(response!.errors, details);
-              let warnings = replaceDetailsInMessages(response!.warnings, details);
-              let outstanding = 1;
-              let next = () => --outstanding === 0 && callback(null, { warnings, code: response!.code, map: response!.map });
-              if (errors.length > 0) return callback(failureErrorWithLog('Transform failed', errors, warnings), null);
-
-              // Read the JavaScript file from the file system
-              if (response!.codeFS) {
-                outstanding++;
-                fs.readFile(response!.code, (err, contents) => {
-                  if (err !== null) {
-                    callback(err, null);
-                  } else {
-                    response!.code = contents!;
-                    next();
-                  }
-                });
-              }
-
-              // Read the source map file from the file system
-              if (response!.mapFS) {
-                outstanding++;
-                fs.readFile(response!.map, (err, contents) => {
-                  if (err !== null) {
-                    callback(err, null);
-                  } else {
-                    response!.map = contents!;
-                    next();
-                  }
-                });
-              }
-
-              next();
-            });
-          } catch (e) {
-            let flags: string[] = [];
-            try { pushLogFlags(flags, options, {}, isTTY, logLevelDefault) } catch { }
-            const error = extractErrorMessageV8(e, streamIn, details, void 0);
-            sendRequest(refs, { command: 'error', flags, error }, () => {
-              error.detail = details.load(error.detail);
-              callback(failureErrorWithLog('Transform failed', [error], []), null);
-            });
-          }
-        };
-        if (typeof input === 'string' && input.length > 1024 * 1024) {
-          let next = start;
-          start = () => fs.writeFile(input, next);
-        }
-        start(null);
-      },
-
-      formatMessages(callName, refs, messages, options, callback) {
-        let result = sanitizeMessages(messages, 'messages', null);
-        if (!options) throw new Error(`Missing second argument in ${callName}() call`);
-        let keys: OptionKeys = {};
-        let kind = getFlag(options, keys, 'kind', mustBeString);
-        let color = getFlag(options, keys, 'color', mustBeBoolean);
-        let terminalWidth = getFlag(options, keys, 'terminalWidth', mustBeInteger);
-        checkForInvalidFlags(options, keys, `in ${callName}() call`);
-        if (kind === void 0) throw new Error(`Missing "kind" in ${callName}() call`);
-        if (kind !== 'error' && kind !== 'warning') throw new Error(`Expected "kind" to be "error" or "warning" in ${callName}() call`);
-        let request: protocol.FormatMsgsRequest = {
-          command: 'format-msgs',
-          messages: result,
-          isWarning: kind === 'warning',
-        }
-        if (color !== void 0) request.color = color;
-        if (terminalWidth !== void 0) request.terminalWidth = terminalWidth;
-        sendRequest<protocol.FormatMsgsRequest, protocol.FormatMsgsResponse>(refs, request, (error, response) => {
-          if (error) return callback(new Error(error), null);
-          callback(null, response!.messages);
-        });
-      },
+      buildOrServe,
+      transform,
+      formatMessages,
     },
   };
 }

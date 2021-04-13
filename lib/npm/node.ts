@@ -1,5 +1,5 @@
-import * as types from "./types";
-import * as common from "./common";
+import * as types from "../shared/types";
+import * as common from "../shared/common";
 
 import child_process = require('child_process');
 import crypto = require('crypto');
@@ -73,6 +73,55 @@ let esbuildCommandAndArgs = (): [string, string[]] => {
 // Return true if stderr is a TTY
 let isTTY = () => tty.isatty(2);
 
+let fsSync: common.StreamFS = {
+  readFile(tempFile, callback) {
+    try {
+      let contents = fs.readFileSync(tempFile, 'utf8');
+      try {
+        fs.unlinkSync(tempFile);
+      } catch {
+      }
+      callback(null, contents);
+    } catch (err) {
+      callback(err, null);
+    }
+  },
+  writeFile(contents, callback) {
+    try {
+      let tempFile = randomFileName();
+      fs.writeFileSync(tempFile, contents);
+      callback(tempFile);
+    } catch {
+      callback(null);
+    }
+  },
+};
+
+let fsAsync: common.StreamFS = {
+  readFile(tempFile, callback) {
+    try {
+      fs.readFile(tempFile, 'utf8', (err, contents) => {
+        try {
+          fs.unlink(tempFile, () => callback(err, contents));
+        } catch {
+          callback(err, contents);
+        }
+      });
+    } catch (err) {
+      callback(err, null);
+    }
+  },
+  writeFile(contents, callback) {
+    try {
+      let tempFile = randomFileName();
+      fs.writeFile(tempFile, contents, err =>
+        err !== null ? callback(null) : callback(tempFile));
+    } catch {
+      callback(null);
+    }
+  },
+};
+
 export let version = ESBUILD_VERSION;
 
 export let build: typeof types.build = (options: types.BuildOptions): Promise<any> =>
@@ -95,9 +144,14 @@ export let buildSync: typeof types.buildSync = (options: types.BuildOptions): an
   }
 
   let result: types.BuildResult;
-  runServiceSync(service => service.buildOrServe('buildSync', null, null, options, isTTY(), defaultWD, (err, res) => {
-    if (err) throw err;
-    result = res as types.BuildResult;
+  runServiceSync(service => service.buildOrServe({
+    callName: 'buildSync',
+    refs: null,
+    serveOptions: null,
+    options,
+    isTTY: isTTY(),
+    defaultWD,
+    callback: (err, res) => { if (err) throw err; result = res as types.BuildResult },
   }));
   return result!;
 };
@@ -110,31 +164,14 @@ export let transformSync: typeof types.transformSync = (input, options) => {
   }
 
   let result: types.TransformResult;
-  runServiceSync(service => service.transform('transformSync', null, input, options || {}, isTTY(), {
-    readFile(tempFile, callback) {
-      try {
-        let contents = fs.readFileSync(tempFile, 'utf8');
-        try {
-          fs.unlinkSync(tempFile);
-        } catch {
-        }
-        callback(null, contents);
-      } catch (err) {
-        callback(err, null);
-      }
-    },
-    writeFile(contents, callback) {
-      try {
-        let tempFile = randomFileName();
-        fs.writeFileSync(tempFile, contents);
-        callback(tempFile);
-      } catch {
-        callback(null);
-      }
-    },
-  }, (err, res) => {
-    if (err) throw err;
-    result = res!;
+  runServiceSync(service => service.transform({
+    callName: 'transformSync',
+    refs: null,
+    input,
+    options: options || {},
+    isTTY: isTTY(),
+    fs: fsSync,
+    callback: (err, res) => { if (err) throw err; result = res! },
   }));
   return result!;
 };
@@ -147,9 +184,12 @@ export let formatMessagesSync: typeof types.formatMessagesSync = (messages, opti
   }
 
   let result: string[];
-  runServiceSync(service => service.formatMessages('formatMessagesSync', null, messages, options, (err, res) => {
-    if (err) throw err;
-    result = res!;
+  runServiceSync(service => service.formatMessages({
+    callName: 'formatMessagesSync',
+    refs: null,
+    messages,
+    options,
+    callback: (err, res) => { if (err) throw err; result = res! },
   }));
   return result!;
 };
@@ -217,12 +257,14 @@ let ensureServiceIsRunning = (): Service => {
   longLivedService = {
     build: (options: types.BuildOptions): Promise<any> => {
       return new Promise<types.BuildResult>((resolve, reject) => {
-        service.buildOrServe('build', refs, null, options, isTTY(), defaultWD, (err, res) => {
-          if (err) {
-            reject(err)
-          } else {
-            resolve(res as types.BuildResult);
-          }
+        service.buildOrServe({
+          callName: 'build',
+          refs,
+          serveOptions: null,
+          options,
+          isTTY: isTTY(),
+          defaultWD,
+          callback: (err, res) => err ? reject(err) : resolve(res as types.BuildResult),
         })
       })
     },
@@ -230,45 +272,36 @@ let ensureServiceIsRunning = (): Service => {
       if (serveOptions === null || typeof serveOptions !== 'object')
         throw new Error('The first argument must be an object')
       return new Promise((resolve, reject) =>
-        service.buildOrServe('serve', refs, serveOptions, buildOptions, isTTY(), defaultWD, (err, res) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(res as types.ServeResult);
-          }
+        service.buildOrServe({
+          callName: 'serve',
+          refs,
+          serveOptions,
+          options: buildOptions,
+          isTTY: isTTY(),
+          defaultWD, callback: (err, res) => err ? reject(err) : resolve(res as types.ServeResult),
         }))
     },
     transform: (input, options) => {
       return new Promise((resolve, reject) =>
-        service.transform('transform', refs, input, options || {}, isTTY(), {
-          readFile(tempFile, callback) {
-            try {
-              fs.readFile(tempFile, 'utf8', (err, contents) => {
-                try {
-                  fs.unlink(tempFile, () => callback(err, contents));
-                } catch {
-                  callback(err, contents);
-                }
-              });
-            } catch (err) {
-              callback(err, null);
-            }
-          },
-          writeFile(contents, callback) {
-            try {
-              let tempFile = randomFileName();
-              fs.writeFile(tempFile, contents, err =>
-                err !== null ? callback(null) : callback(tempFile));
-            } catch {
-              callback(null);
-            }
-          },
-        }, (err, res) => err ? reject(err) : resolve(res!)));
+        service.transform({
+          callName: 'transform',
+          refs,
+          input,
+          options: options || {},
+          isTTY: isTTY(),
+          fs: fsAsync,
+          callback: (err, res) => err ? reject(err) : resolve(res!),
+        }));
     },
     formatMessages: (messages, options) => {
       return new Promise((resolve, reject) =>
-        service.formatMessages('formatMessages', refs, messages, options, (err, res) =>
-          err ? reject(err) : resolve(res!)));
+        service.formatMessages({
+          callName: 'formatMessages',
+          refs,
+          messages,
+          options,
+          callback: (err, res) => err ? reject(err) : resolve(res!),
+        }));
     },
   };
   return longLivedService;
